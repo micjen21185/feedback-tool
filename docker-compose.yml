@@ -1,14 +1,18 @@
 version: '3.8'
 
 services:
-  # 1. DODANA USŁUGA OLLAMA
+  # Containerized Ollama — used on GCloud / any host without a local Ollama.
+  # No host port mapping: the app reaches it over the internal Docker network,
+  # so it never collides with a local (host-installed) Ollama on 11434.
   ollama:
     image: ollama/ollama
     container_name: ollama-cpu
     volumes:
       - ollama_data:/root/.ollama
-    ports:
-      - "11434:11434"
+    # Uncomment to expose it on the host (only if you need to reach it from your PC).
+    # Use 11435 to avoid clashing with a locally-installed Ollama on 11434.
+    # ports:
+    #   - "11435:11434"
 
   feedback_assistant:
     build: .
@@ -19,13 +23,15 @@ services:
       - ./.env:/app/.env
       - ./observability_data:/app/observability_data
     environment:
-      # 2. ZMIENIONY ADRES URL OLLAMY
-      - OLLAMA_API_BASE=http://ollama:11434
-    # 3. DODANA ZALEŻNOŚĆ
+      # Default = containerized Ollama (works on GCloud out of the box).
+      # LOCAL OVERRIDE: put OLLAMA_API_BASE=http://host.docker.internal:11434 in .env
+      # to use the Ollama already running on your machine instead of the container.
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
+    extra_hosts:
+      # Lets host.docker.internal resolve on Linux hosts; harmless on Win/Mac.
+      - "host.docker.internal:host-gateway"
     depends_on:
       - ollama
-    # 4. USUNIĘTE extra_hosts
 
-# 5. DEKLARACJA WOLUMENU
 volumes:
   ollama_data:

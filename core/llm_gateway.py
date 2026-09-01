@@ -56,6 +56,12 @@ class LLMGateway:
                                       retry_on_timeout: bool = True) -> Any:
         start_time = time.time()
 
+        # For local Ollama models, pass the base URL explicitly (with a safe default) instead
+        # of relying on litellm's implicit OLLAMA_API_BASE env lookup. Lets the same image talk
+        # to a containerized Ollama (GCloud) or a host-installed one (local) via one env var.
+        if model.startswith("ollama/") and "api_base" not in call_kwargs:
+            call_kwargs["api_base"] = Config.OLLAMA_API_BASE
+
         response = await self._safe_acompletion(retry_on_timeout=retry_on_timeout, **call_kwargs)
 
         total_time_s = time.time() - start_time

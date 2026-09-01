@@ -112,10 +112,27 @@ Cloud Run is not a good host for Ollama model serving. To use `ollama/*` models,
 --set-env-vars OLLAMA_API_BASE=http://<ollama-host>:11434
 ```
 
-Single-box alternative (demo): run Ollama + Streamlit together on one GPU VM via
-`docker-compose` (the repo's `docker-compose.yml` already wires `OLLAMA_API_BASE` and
-`host.docker.internal` for local use). Note: the GPU only provides hardware — an Ollama server process must be running
-and have the models pulled.
+Single-box alternative (demo): run Ollama + Streamlit together on one GPU VM via `docker-compose`.
+
+### Choosing the Ollama endpoint (`OLLAMA_API_BASE`)
+
+The app reads `OLLAMA_API_BASE` (see `Config.OLLAMA_API_BASE`) and passes it explicitly to litellm for every `ollama/*`
+call. `docker-compose.yml` defaults it to the containerized Ollama and lets you override it from `.env`:
+
+```yaml
+OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
+```
+
+- **GCloud / containerized Ollama:** leave it unset — the default `http://ollama:11434` (the compose service name) is
+  used. The `ollama` service has **no host port mapping**, so it never collides with anything on the host.
+- **Local dev with a host-installed Ollama:** put `OLLAMA_API_BASE=http://host.docker.internal:11434`
+  in `.env`. This reuses the Ollama already running on your machine (with your pulled models + GPU)
+  instead of the empty CPU-only container. For this to work, Ollama must listen on all interfaces:
+  set `OLLAMA_HOST=0.0.0.0:11434` on the host and restart Ollama (by default it binds `127.0.0.1`, which containers
+  cannot reach).
+- **Running the app outside Docker entirely:** the code default is `http://localhost:11434`.
+
+Note: the GPU only provides hardware — an Ollama server process must be running and have the models pulled.
 
 ## 4. Pre-deploy verification
 

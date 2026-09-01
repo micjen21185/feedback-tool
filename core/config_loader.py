@@ -12,6 +12,13 @@ class Config:
 
     OLLAMA_MODELS_PATH = os.getenv("OLLAMA_MODELS_PATH", r"E:\OllamaModels")
 
+    # Base URL for the Ollama server. Read explicitly (not just relied upon via litellm's
+    # env auto-detection) so it is guaranteed to be passed and has a safe default.
+    #   - GCloud / containerized Ollama: default "http://ollama:11434" (compose service name)
+    #   - Local dev with host-installed Ollama: set OLLAMA_API_BASE=http://host.docker.internal:11434
+    #     (or http://localhost:11434 when running the app outside Docker).
+    OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
+
     # Lightweight model used for utility tasks (gatekeeper TAK/NIE, query generation, context compression).
     UTILITY_MODEL = os.getenv("UTILITY_MODEL", "ollama/llama3.2:1b")
 
