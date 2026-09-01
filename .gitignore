@@ -1,0 +1,27 @@
+# Environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Secrets & local config
+.env
+.env.*
+
+# Databases / telemetry
+*.db
+*.sqlite3
+llm_benchmark.db
+observability_data/
+
+# LLM export dump
+llm_eksport/
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  feedback_assistant:
+    build: .
+    container_name: feedback_assistant_app
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./.env:/app/.env
+      - ./observability_data:/app/observability_data
+    environment:
+      - OLLAMA_API_BASE=http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
