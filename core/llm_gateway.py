@@ -1,12 +1,11 @@
 import asyncio
 import json
+import litellm
 import re
 import time
-from typing import Any, List
-
-import litellm
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from typing import Any, List, Optional
 
 from core.config_loader import Config
 from models.schemas import PhaseTelemetry
@@ -14,12 +13,20 @@ from observabilty.metrics_engine import ObservabilityManager, CostEngine
 
 litellm.enable_cache = False
 
+# Transient errors that are always worth retrying (network/rate blips).
+_TRANSIENT_ERRORS = (
+    litellm.exceptions.RateLimitError,
+    litellm.exceptions.APIConnectionError,
+)
+
 
 class LLMGateway:
-    def __init__(self, obs_manager: ObservabilityManager, max_concurrent_requests: int = 15):
+    def __init__(self, obs_manager: ObservabilityManager, max_concurrent_requests: int = 15,
+                 default_timeout: Optional[int] = None):
         self.obs = obs_manager
         self.session_telemetry: List[PhaseTelemetry] = []
         self._semaphore = asyncio.Semaphore(max_concurrent_requests)
+        self.default_timeout = default_timeout or Config.LLM_REQUEST_TIMEOUT
 
     def get_session_telemetry(self) -> List[PhaseTelemetry]:
         return self.session_telemetry
@@ -27,24 +34,29 @@ class LLMGateway:
     def reset_session_telemetry(self):
         self.session_telemetry = []
 
-    @retry(
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((
-                litellm.exceptions.RateLimitError,
-                litellm.exceptions.APIConnectionError,
-                litellm.exceptions.Timeout
-        )),
-        reraise=True
-    )
-    async def _safe_acompletion(self, **kwargs) -> Any:
-        async with self._semaphore:
-            return await litellm.acompletion(**kwargs)
+    async def _safe_acompletion(self, retry_on_timeout: bool = True, **kwargs) -> Any:
+        # Timeouts are retried for the small map-phase calls (a blip may clear), but NOT for
+        # the heavy reduce/monolith calls: retrying a call that is slow *because the work is
+        # genuinely large* just burns 4x the wall-clock and times out again anyway.
+        retry_types = _TRANSIENT_ERRORS + ((litellm.exceptions.Timeout,) if retry_on_timeout else ())
 
-    async def _execute_with_telemetry(self, prompt: str, model: str, agent_role: str, call_kwargs: dict) -> Any:
+        @retry(
+            stop=stop_after_attempt(4),
+            wait=wait_exponential(multiplier=1, min=2, max=10),
+            retry=retry_if_exception_type(retry_types),
+            reraise=True
+        )
+        async def _call() -> Any:
+            async with self._semaphore:
+                return await litellm.acompletion(**kwargs)
+
+        return await _call()
+
+    async def _execute_with_telemetry(self, prompt: str, model: str, agent_role: str, call_kwargs: dict,
+                                      retry_on_timeout: bool = True) -> Any:
         start_time = time.time()
 
-        response = await self._safe_acompletion(**call_kwargs)
+        response = await self._safe_acompletion(retry_on_timeout=retry_on_timeout, **call_kwargs)
 
         total_time_s = time.time() - start_time
 
@@ -56,7 +68,12 @@ class LLMGateway:
         if model in Config.LOCAL_MODELS:
             cost_usd = CostEngine.calculate_local_cost(total_time_s, hourly_tco_usd=1.5)
         else:
-            cost_usd = litellm.cost_calculator.cost_per_token(model, tokens_in, tokens_out) or 0.0
+            # completion_cost returns a single combined float. (cost_per_token returns a
+            # (prompt_cost, completion_cost) TUPLE, which SQLite then rejects as a parameter.)
+            try:
+                cost_usd = litellm.completion_cost(completion_response=response) or 0.0
+            except Exception:
+                cost_usd = 0.0
 
         self.obs.log_task(
             model_name=model, phase=agent_role, prompt=prompt, response=response_text,
@@ -131,10 +148,11 @@ class LLMGateway:
 
     async def execute_structured(
             self, prompt: str, schema_class: type[BaseModel], model: str,
-            agent_role: str = "Unassigned Agent", **kwargs
+            agent_role: str = "Unassigned Agent", retry_on_timeout: bool = True, **kwargs
     ) -> BaseModel:
 
         full_prompt = f"{prompt}{self._format_schema_contract(schema_class)}"
+        kwargs.setdefault("timeout", self.default_timeout)
 
         if model in Config.COMMERCIAL_MODELS:
             call_kwargs = {
@@ -143,7 +161,8 @@ class LLMGateway:
                 "response_format": schema_class,
             }
             call_kwargs.update(kwargs)
-            response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs)
+            response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs,
+                                                          retry_on_timeout=retry_on_timeout)
             if hasattr(response.choices[0].message, 'parsed') and response.choices[0].message.parsed:
                 return response.choices[0].message.parsed
 
@@ -152,7 +171,8 @@ class LLMGateway:
             "messages": [{"role": "user", "content": full_prompt}],
         }
         call_kwargs.update(kwargs)
-        response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs)
+        response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs,
+                                                      retry_on_timeout=retry_on_timeout)
         raw_text = response.choices[0].message.content or ""
 
         try:
@@ -161,13 +181,16 @@ class LLMGateway:
             return schema_class.model_validate(self._parse_xml_fallback(raw_text, schema_class))
 
     async def execute_raw(
-            self, prompt: str, model: str, agent_role: str = "Unassigned Agent", **kwargs
+            self, prompt: str, model: str, agent_role: str = "Unassigned Agent",
+            retry_on_timeout: bool = True, **kwargs
     ) -> str:
+        kwargs.setdefault("timeout", self.default_timeout)
         call_kwargs = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
         }
         call_kwargs.update(kwargs)
 
-        response = await self._execute_with_telemetry(prompt, model, agent_role, call_kwargs)
+        response = await self._execute_with_telemetry(prompt, model, agent_role, call_kwargs,
+                                                      retry_on_timeout=retry_on_timeout)
         return response.choices[0].message.content

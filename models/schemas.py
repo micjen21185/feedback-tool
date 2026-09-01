@@ -1,7 +1,6 @@
 from enum import Enum
-from typing import Dict, Optional, List
-
 from pydantic import BaseModel, Field
+from typing import Dict, Optional, List
 
 
 class AnomalySeverity(str, Enum):
@@ -135,8 +134,9 @@ class TelemetryReport(BaseModel):
 
 
 class ScoreCard(BaseModel):
-    factual_score: float = Field(default=100.0, description="Ocena merytoryczna 0-100 (100 = bez błędów).")
-    linguistic_score: float = Field(default=100.0, description="Ocena językowa/dynamiki 0-100.")
+    factual_score: Optional[float] = Field(default=None, description="Ocena merytoryczna 0-100 (None = nie dotyczy).")
+    linguistic_score: Optional[float] = Field(default=None,
+                                              description="Ocena językowa/dynamiki 0-100 (None = nie dotyczy).")
     slide_coverage_score: Optional[float] = Field(default=None,
                                                   description="Ocena pokrycia slajdów 0-100 (tylko prezentacja).")
     overall_score: float = Field(default=100.0, description="Łączna ocena 0-100 (ważona).")

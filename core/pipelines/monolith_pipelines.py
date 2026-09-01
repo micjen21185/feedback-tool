@@ -1,6 +1,7 @@
 import re
 from typing import Any, List
 
+from core.config_loader import Config
 from models.schemas import (
     LectureMetadata, DeepAnalysis, ConstructiveFeedback,
     HegemonOutput, SystemConfiguration, ScoreCard, readiness_verdict
@@ -14,7 +15,11 @@ class MonolithNakedPipeline:
 
     def _extract_tag(self, text: str, tag: str) -> str:
         match = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL | re.IGNORECASE)
-        return match.group(1).strip() if match else ""
+        if match:
+            return match.group(1).strip()
+        # Fallback for unclosed/truncated tags: open tag to next opening tag or end of text.
+        open_match = re.search(f"<{tag}>(.*?)(?=<[a-z_]+>|$)", text, re.DOTALL | re.IGNORECASE)
+        return open_match.group(1).strip() if open_match else ""
 
     def _extract_list(self, text: str, tag: str) -> List[str]:
         content = self._extract_tag(text, tag)
@@ -74,7 +79,9 @@ Nie używaj JSON! Przy każdej konkretnej obserwacji podawaj znacznik czasu [MM:
 </TEXT>
 """
         raw_response = await self.gateway.execute_raw(
-            prompt=prompt, model=self.config.hegemon_model, agent_role="Hegemon (Scenario 1)"
+            prompt=prompt, model=self.config.hegemon_model, agent_role="Hegemon (Scenario 1)",
+            max_tokens=Config.HEGEMON_MAX_TOKENS, timeout=Config.HEGEMON_REQUEST_TIMEOUT,
+            retry_on_timeout=False
         )
 
         return HegemonOutput(
@@ -108,7 +115,11 @@ class MonolithTwoPhasePipeline:
 
     def _extract_tag(self, text: str, tag: str) -> str:
         match = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL | re.IGNORECASE)
-        return match.group(1).strip() if match else ""
+        if match:
+            return match.group(1).strip()
+        # Fallback for unclosed/truncated tags: open tag to next opening tag or end of text.
+        open_match = re.search(f"<{tag}>(.*?)(?=<[a-z_]+>|$)", text, re.DOTALL | re.IGNORECASE)
+        return open_match.group(1).strip() if open_match else ""
 
     def _extract_list(self, text: str, tag: str) -> List[str]:
         content = self._extract_tag(text, tag)
@@ -141,7 +152,9 @@ Zwróć odpowiedź w poniższych tagach (NIE UŻYWAJ JSON):
 </TEXT>
 """
         raw_analysis = await self.gateway.execute_raw(
-            prompt=phase_1_prompt, model=self.config.hegemon_model, agent_role="Hegemon (Scenariusz 2 - Analiza)"
+            prompt=phase_1_prompt, model=self.config.hegemon_model, agent_role="Hegemon (Scenariusz 2 - Analiza)",
+            max_tokens=Config.HEGEMON_MAX_TOKENS, timeout=Config.HEGEMON_REQUEST_TIMEOUT,
+            retry_on_timeout=False
         )
 
         analysis_obj = DeepAnalysis(
@@ -181,7 +194,9 @@ Oceń wystąpienie w 5 wymiarach, każdy 0-100, wraz z jednym zdaniem uzasadnien
 </INSTRUCTIONS>
 """
         raw_feedback = await self.gateway.execute_raw(
-            prompt=phase_2_prompt, model=self.config.hegemon_model, agent_role="Hegemon (Scenariusz 2 - Feedback)"
+            prompt=phase_2_prompt, model=self.config.hegemon_model, agent_role="Hegemon (Scenariusz 2 - Feedback)",
+            max_tokens=Config.HEGEMON_MAX_TOKENS, timeout=Config.HEGEMON_REQUEST_TIMEOUT,
+            retry_on_timeout=False
         )
 
         feedback_obj = ConstructiveFeedback(

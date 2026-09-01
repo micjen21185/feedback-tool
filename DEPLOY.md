@@ -67,10 +67,35 @@ gcloud run deploy feedback-tool \
 Why each flag:
 
 - `--memory 4Gi`: torch + faiss + sentence-transformers need headroom or they OOM.
-- `--timeout 900`: a swarm scenario can take minutes; the default 300s would kill it.
+- `--timeout 900`: a swarm scenario can take minutes; the default 300s would kill it. For 40+ min talks on slow local
+  models, raise this up to Cloud Run's max of `3600`. This is the ceiling on the whole HTTP request to Streamlit and is
+  **independent** of the per-LLM-call timeout below.
 - `--concurrency 1`: each run is heavy and Streamlit is session-stateful; avoid sharing a container.
 - `LLM_BENCHMARK_DB=/tmp/...`: Cloud Run's filesystem is read-only except `/tmp`.
 - `--set-secrets`: inject API keys from Secret Manager. **Do not** ship a `.env` file.
+
+### LLM timeouts (long talks)
+
+litellm applies a **per-request** timeout (default 600s) to *each individual* LLM call — every map agent call,
+gatekeeper, RAG call, and the single big reduce/monolith call each get their own window. On 40+ minute talks the
+reduce/monolith call alone can exceed 600s. These env vars tune it:
+
+- `LLM_REQUEST_TIMEOUT` (default `1800`): per-request timeout for the small map-phase calls.
+- `HEGEMON_REQUEST_TIMEOUT` (default `3600`): per-request timeout for the heavy reduce / monolith calls that generate
+  the full essay.
+- `HEGEMON_MAX_TOKENS` (default `4096`): max **output** tokens for the report. 4096 is the safe floor (Claude 3.5 Sonnet
+  caps at 4096 without a beta header); raise to `8192` for gpt-4o / capable local models on long talks.
+
+Two behaviours to know:
+
+- Timeouts on the **map phase** are retried (a blip may clear); timeouts on the **reduce/monolith**
+  call are **not** retried (a call that is slow because the work is large won't get faster on retry), so it fails fast
+  instead of burning `4x` the wall-clock.
+- If the swarm reduce (Hegemon) fails anyway, the run is **not** lost: a degraded report is returned built from the
+  deterministic scorecard + the aggregated map findings.
+
+Set `HEGEMON_REQUEST_TIMEOUT` **≤** the Cloud Run `--timeout`, or the platform will kill the request before litellm's
+own timeout fires.
 
 ### Secrets (one-time)
 

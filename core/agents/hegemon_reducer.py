@@ -1,6 +1,7 @@
 import re
 from typing import List
 
+from core.config_loader import Config
 from core.llm_gateway import LLMGateway
 from models.schemas import HegemonOutput, LectureMetadata, DeepAnalysis, ConstructiveFeedback
 
@@ -52,7 +53,13 @@ Wymagane tagi:
 
     def _extract_tag(self, text: str, tag: str) -> str:
         match = re.search(f"<{tag}>(.*?)</{tag}>", text, re.DOTALL | re.IGNORECASE)
-        return match.group(1).strip() if match else ""
+        if match:
+            return match.group(1).strip()
+        # Fallback: model opened the tag but never closed it (common on small models or
+        # when the response was truncated at max_tokens). Capture from the open tag to the
+        # next opening tag or end of text so partial content is not silently discarded.
+        open_match = re.search(f"<{tag}>(.*?)(?=<[a-z_]+>|$)", text, re.DOTALL | re.IGNORECASE)
+        return open_match.group(1).strip() if open_match else ""
 
     def _extract_list(self, text: str, tag: str) -> List[str]:
         content = self._extract_tag(text, tag)
@@ -106,8 +113,10 @@ Wygeneruj raport używając tagów.
             prompt=f"{system_prompt}\n{user_prompt}",
             model=self.model,
             agent_role="Hegemon (Reduce Phase)",
-            max_tokens=4096,
-            temperature=0.3
+            max_tokens=Config.HEGEMON_MAX_TOKENS,
+            temperature=0.3,
+            timeout=Config.HEGEMON_REQUEST_TIMEOUT,
+            retry_on_timeout=False,  # a too-slow reduce won't get faster on retry
         )
 
         return HegemonOutput(

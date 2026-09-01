@@ -29,6 +29,13 @@ class FactualAgent:
     def _build_factual_context_rules(self, knowledge_level: str) -> str:
         return f"""Jesteś weryfikatorem merytoryki. Twoim zadaniem jest ocena faktów, ale z pełną świadomością, że prelegent mówi do widowni na poziomie: {knowledge_level}.
 
+<KONTRAKT OSADZENIA (ANTY-HALUCYNACJA) — NADRZĘDNY>
+1. Oceniaj WYŁĄCZNIE to, co prelegent NAPRAWDĘ powiedział w dostarczonym fragmencie. NIGDY nie wymyślaj tez, liczb, twierdzeń ani tematów, których w tekście nie ma.
+2. Każdy zgłoszony błąd MUSI zawierać dosłowny cytat z wypowiedzi (fragment w cudzysłowie), do którego się odnosisz. Jeśli nie potrafisz zacytować konkretnego fragmentu, NIE zgłaszaj błędu.
+3. Brak błędów to POPRAWNA i częsta odpowiedź. Jeśli fragment jest trywialny, krótki, poprawny lub to zwykła narracja — zwróć PUSTE listy błędów. Nie szukaj problemów na siłę.
+4. Nie oceniaj stylu, tempa ani dykcji — to zadanie innego agenta. Zajmujesz się tylko faktami.
+5. Jeśli transkrypcja jest niewyraźna/zniekształcona, załóż życzliwą interpretację i NIE traktuj zniekształcenia transkrypcji jako błędu merytorycznego prelegenta.
+
 ŻELAZNA ZASADA UPROSZCZEŃ (DOPASOWANIE DO WIDOWNI):
 Zanim uznasz fragment za "błąd merytoryczny" (Factual Error), sprawdź poziom wiedzy słuchaczy.
 - Jeśli poziom to "Podstawowy" (Beginner/Junior), prelegent ma pełne prawo do skrótów myślowych, analogii i pomijania skrajnych wyjątków akademickich. Upraszczanie trudnych definicji (np. "Zmienna to takie pudełko na dane") NIE JEST BŁĘDEM, lecz znakomitą praktyką pedagogiczną. Nie umieszczaj takich uproszczeń w tablicy `factual_errors`.

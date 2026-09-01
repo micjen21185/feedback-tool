@@ -15,6 +15,20 @@ class Config:
     # Lightweight model used for utility tasks (gatekeeper TAK/NIE, query generation, context compression).
     UTILITY_MODEL = os.getenv("UTILITY_MODEL", "ollama/llama3.2:1b")
 
+    # Per-request LLM timeout (seconds). litellm defaults to 600; long talks + slow local
+    # models on the monolith / Hegemon reduce phase routinely exceed that.
+    LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "1800"))
+
+    # Longer ceiling for the heavy reduce/monolith calls that produce the full essay.
+    HEGEMON_REQUEST_TIMEOUT = int(os.getenv("HEGEMON_REQUEST_TIMEOUT", "3600"))
+
+    # Max OUTPUT tokens for the final report. 4096 is the safe floor (Claude 3.5 Sonnet caps
+    # at 4096 without the max-tokens beta header). Capable models can go to 8192+.
+    HEGEMON_MAX_TOKENS = int(os.getenv("HEGEMON_MAX_TOKENS", "4096"))
+
+    # Directory for map-phase checkpoints so a crashed long run can resume mid-way.
+    CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", os.getenv("LLM_BENCHMARK_DB", "llm_benchmark.db"))
+
     LOCAL_MODELS = [
         "ollama/llama3.1:70b",
         "ollama/gemma3:27b",
@@ -37,7 +51,8 @@ class Config:
         "gpt-4o",
         "gpt-4o-mini",
         "claude-3-5-sonnet-20240620",
-        "gemini/gemini-1.5-pro"
+        "gemini/gemini-2.5-pro",
+        "gemini/gemini-2.5-flash"
     ]
 
     @classmethod

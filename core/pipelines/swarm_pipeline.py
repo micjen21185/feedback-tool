@@ -1,9 +1,12 @@
 import asyncio
+import logging
 from typing import List, Tuple, Any
 
 from models.schemas import (
-    LectureMetadata, ChunkPayload, HegemonOutput
+    LectureMetadata, ChunkPayload, HegemonOutput, DeepAnalysis, ConstructiveFeedback
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SwarmNaivePipeline:
@@ -46,13 +49,20 @@ class SwarmNaivePipeline:
         thematic_blocks, behavioral_profiles = await self.combine_engine.aggregate_dual_track(mapped_results, metadata)
         scorecard = self.combine_engine.compute_scorecard(ling_results, fact_results, slide_coverage)
 
-        report = await self.hegemon.generate_report(
-            metadata=metadata,
-            thematic_blocks=thematic_blocks,
-            behavioral_profiles=behavioral_profiles,
-            presentation_context=presentation_context,
-            scorecard=scorecard
-        )
+        try:
+            report = await self.hegemon.generate_report(
+                metadata=metadata,
+                thematic_blocks=thematic_blocks,
+                behavioral_profiles=behavioral_profiles,
+                presentation_context=presentation_context,
+                scorecard=scorecard
+            )
+        except Exception as e:
+            # The reduce call failed (e.g. timeout on a 40+ min talk). Do NOT lose the whole
+            # run: the scorecard is deterministic and the map findings are already aggregated,
+            # so return a degraded-but-valid report built from what we have.
+            logger.error("Hegemon reduce failed (%s). Returning degraded report from map findings.", e)
+            report = self._build_fallback_report(thematic_blocks, behavioral_profiles)
         report.scorecard = scorecard
 
         # Timestamps of chunks that produced ANY finding in the map phase — used by the
@@ -86,3 +96,31 @@ class SwarmNaivePipeline:
                     batch[i + 1].trailing_fact_summary = fact_out.next_state
 
         return batch_results
+
+    @staticmethod
+    def _build_fallback_report(thematic_blocks: List[str], behavioral_profiles: List[str]) -> HegemonOutput:
+        # Degraded report used when the Hegemon reduce call fails. Surfaces the raw aggregated
+        # map findings so the run is not wasted; the deterministic scorecard is attached by the caller.
+        thematic_text = "\n".join(thematic_blocks) if isinstance(thematic_blocks, list) else str(thematic_blocks)
+        behavioral_text = "\n".join(behavioral_profiles) if isinstance(behavioral_profiles, list) else str(
+            behavioral_profiles)
+        notice = ("⚠️ Faza reduce (Hegemon) nie powiodła się — prawdopodobnie przekroczono limit czasu na długim "
+                  "wystąpieniu. Poniżej surowe, zagregowane ustalenia z fazy map oraz deterministyczna ocena punktowa.")
+        return HegemonOutput(
+            analysis=DeepAnalysis(
+                factual_summary=f"[Raport awaryjny] {notice}\n\n{thematic_text}",
+                linguistic_summary=behavioral_text,
+                missed_context=[]
+            ),
+            feedback=ConstructiveFeedback(
+                executive_summary_markdown=(
+                    f"> {notice}\n\n"
+                    f"### Ustalenia merytoryczne (map)\n{thematic_text}\n\n"
+                    f"### Profile behawioralne (map)\n{behavioral_text}"
+                ),
+                strengths=[],
+                areas_for_improvement=[],
+                actionable_tips=["Uruchom ponownie fazę reduce (mniejszy model Hegemona lub większy limit czasu)."],
+                overall_message=notice
+            )
+        )

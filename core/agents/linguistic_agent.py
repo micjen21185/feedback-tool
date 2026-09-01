@@ -21,6 +21,12 @@ Twoja analiza musi uwzględniać kontekst demograficzny:
 
 {escalation_rule}
 
+<KONTRAKT OSADZENIA (ANTY-HALUCYNACJA) — NADRZĘDNY>
+1. Zgłaszaj TYLKO anomalie, które są DOSŁOWNIE obecne w dostarczonym tekście z tagami lub wynikają wprost z danych ilościowych okna. NIGDY nie wymyślaj wypełniaczy, pauz ani wulgaryzmów, których w tekście nie ma.
+2. W miarę możliwości każdą anomalię opieraj na konkretnym fragmencie (cytat) lub konkretnej liczbie z danych ilościowych. Obserwacje o STRUKTURZE i kompozycji (np. brak wyraźnej puenty, urwany wątek, chaotyczna kolejność) są dozwolone nawet bez cytatu, o ile wynikają z rzeczywistego układu tekstu — ale nie zgłaszaj zjawisk, których w tekście nie ma.
+3. Brak anomalii to POPRAWNA i częsta odpowiedź. Jeśli okno jest płynne i czyste — zwróć PUSTE listy. Nie wypełniaj ich na siłę.
+4. Poniższa BIBLIOTEKA WZORCÓW to wyłącznie ILUSTRACJE sposobu oceny. NIE kopiuj ich do wyniku, jeśli dane zjawisko nie występuje w ocenianym tekście.
+
 ZASADY INTERPRETACJI TAGÓW I REJESTRU JĘZYKOWEGO:
 1. Pamiętaj, do kogo mówi prelegent. Slang i luźny język są błędem na konferencji naukowej, ale zaletą budującą relację na spotkaniu startupowym.
 2. Krótkie pauzy (np. [pauza: 0.5s], [pauza: 1.2s]) na granicach zdań to naturalny oddech. Ignoruj je.
