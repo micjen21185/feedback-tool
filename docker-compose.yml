@@ -1,6 +1,15 @@
 version: '3.8'
 
 services:
+  # 1. DODANA USŁUGA OLLAMA
+  ollama:
+    image: ollama/ollama
+    container_name: ollama-cpu
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
   feedback_assistant:
     build: .
     container_name: feedback_assistant_app
@@ -10,6 +19,13 @@ services:
       - ./.env:/app/.env
       - ./observability_data:/app/observability_data
     environment:
-      - OLLAMA_API_BASE=http://host.docker.internal:11434
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      # 2. ZMIENIONY ADRES URL OLLAMY
+      - OLLAMA_API_BASE=http://ollama:11434
+    # 3. DODANA ZALEŻNOŚĆ
+    depends_on:
+      - ollama
+    # 4. USUNIĘTE extra_hosts
+
+# 5. DEKLARACJA WOLUMENU
+volumes:
+  ollama_data:
