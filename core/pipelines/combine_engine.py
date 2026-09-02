@@ -3,6 +3,7 @@ import logging
 from collections import Counter
 from typing import List, Tuple, Any, Optional
 
+from core.config_loader import Config
 from models.schemas import LinguisticOutput, FactualOutput, LectureMetadata, readiness_verdict
 
 logger = logging.getLogger(__name__)
@@ -40,10 +41,22 @@ class CombineEngine:
         if getattr(self.config, 'use_llmlingua', False):
             try:
                 from llmlingua import PromptCompressor
-                self.compressor = PromptCompressor("llmlingua-small")
-                logger.info("LLMLingua loaded into RAM.")
+                # Correct LLMLingua-2 usage: a REAL HF model id + use_llmlingua2=True.
+                # (The old "llmlingua-small" was not a valid identifier → load error.)
+                self.compressor = PromptCompressor(
+                    model_name=Config.LLMLINGUA_MODEL,
+                    use_llmlingua2=True,
+                )
+                logger.info("LLMLingua-2 loaded (%s).", Config.LLMLINGUA_MODEL)
             except ImportError:
-                logger.error("llmlingua is not installed. Install it (uncomment in requirements.txt).")
+                logger.error("llmlingua is not installed. Install it (see requirements.txt).")
+                self.config.use_llmlingua = False
+            except Exception as e:
+                # A bad model id / download failure must NOT crash the scenario — just disable
+                # compression and continue with the uncompressed reduce input.
+                logger.error("LLMLingua load failed (%s: %s). Compression disabled for this run.",
+                             type(e).__name__, e)
+                self.compressor = None
                 self.config.use_llmlingua = False
 
     def _is_duplicate_error(self, new_error: str, seen_errors: List[str]) -> bool:

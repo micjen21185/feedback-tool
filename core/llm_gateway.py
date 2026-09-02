@@ -1,6 +1,7 @@
 import asyncio
 import json
 import litellm
+import logging
 import re
 import time
 from pydantic import BaseModel, ValidationError
@@ -12,6 +13,7 @@ from models.schemas import PhaseTelemetry
 from observabilty.metrics_engine import ObservabilityManager, CostEngine
 
 litellm.enable_cache = False
+logger = logging.getLogger(__name__)
 
 # Transient errors that are always worth retrying (network/rate blips).
 _TRANSIENT_ERRORS = (
@@ -46,6 +48,23 @@ _FATAL_LOCAL_MARKERS = (
 def _is_fatal_local_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return any(marker in msg for marker in _FATAL_LOCAL_MARKERS)
+
+
+def _is_capacity_error(exc: BaseException) -> bool:
+    """True for provider capacity/availability failures where trying a DIFFERENT model helps:
+    rate limits, overload, quota. NOT for model-not-found, context-length, auth, or local OOM —
+    a fallback model wouldn't fix those (and could mask a real config bug)."""
+    if _is_fatal_local_error(exc):
+        return False
+    if isinstance(exc, litellm.exceptions.RateLimitError):
+        return True
+    msg = str(exc).lower()
+    markers = ("rate limit", "429", "overloaded", "capacity", "quota", "resource_exhausted",
+               "too many requests", "503", "service unavailable")
+    # Exclude context-length errors that sometimes co-occur with generic messages.
+    if "context length" in msg or "context window" in msg or "maximum context" in msg:
+        return False
+    return any(m in msg for m in markers)
 
 
 def check_ollama_models(models: list, api_base: Optional[str] = None) -> list:
@@ -157,7 +176,31 @@ class LLMGateway:
         if model_cap is not None and call_kwargs.get("max_tokens", 0) > model_cap:
             call_kwargs["max_tokens"] = model_cap
 
-        response = await self._safe_acompletion(retry_on_timeout=retry_on_timeout, **call_kwargs)
+        try:
+            response = await self._safe_acompletion(retry_on_timeout=retry_on_timeout, **call_kwargs)
+        except Exception as exc:
+            # Fallback ONLY on capacity errors (rate limit / overload / quota), and only if a
+            # fallback model is configured and differs from the one that just failed. We swap the
+            # model here — not via litellm's own fallbacks — so telemetry records the model that
+            # ACTUALLY served the request (provenance matters for the research comparison).
+            fallback = Config.FALLBACK_MODEL
+            if fallback and fallback != model and _is_capacity_error(exc):
+                logger.warning("[fallback] '%s' capacity error (%s) → retrying on '%s'.",
+                               model, type(exc).__name__, fallback)
+                model = fallback
+                agent_role = f"{agent_role} [fallback→{fallback}]"
+                call_kwargs["model"] = fallback
+                # Re-apply the fallback model's own output cap; drop ollama-only api_base if the
+                # fallback is a commercial model.
+                cap = _MODEL_MAX_OUTPUT_TOKENS.get(fallback)
+                if cap is not None and call_kwargs.get("max_tokens", 0) > cap:
+                    call_kwargs["max_tokens"] = cap
+                if not fallback.startswith("ollama/"):
+                    call_kwargs.pop("api_base", None)
+                    call_kwargs.pop("reasoning_effort", None)
+                response = await self._safe_acompletion(retry_on_timeout=retry_on_timeout, **call_kwargs)
+            else:
+                raise
 
         total_time_s = time.time() - start_time
 

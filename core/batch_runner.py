@@ -11,8 +11,9 @@ from core.config_loader import Config
 from core.llm_gateway import LLMGateway
 from core.pipelines.orchestrator import Orchestrator
 from models.schemas import (
-    AgentModelsConfig, ChunkPayload, ExperimentScenario, LectureMetadata, RunModels, RunResult,
-    SlideSummary, SystemConfiguration, TimelinePayload,
+    AgentModelsConfig, ChunkPayload, ConstructiveFeedback, DeepAnalysis, ExperimentScenario,
+    FinalReport, LectureMetadata, RunModels, RunResult, SlideSummary, SystemConfiguration,
+    TelemetryReport, TimelinePayload,
 )
 from observabilty.metrics_engine import ObservabilityManager
 
@@ -64,10 +65,17 @@ def run_batch(
         source_label: str,
         knowledge_base_bytes: Optional[bytes] = None,
         progress_cb: Optional[Callable[[str], None]] = None,
+        on_result: Optional[Callable[[RunResult], None]] = None,
 ) -> List[RunResult]:
-    """Run each scenario in order; return a RunResult per scenario. A single scenario failure is
-    captured in its report (via the pipeline's own fallbacks) and does not abort the batch."""
+    """Run each scenario in order; return a RunResult per scenario.
+
+    Robustness: each scenario is isolated — an unexpected failure in one produces an error-marked
+    RunResult and the batch CONTINUES with the rest (so scenario 3 failing doesn't lose 1–2).
+    Incremental persistence: `on_result` is called as soon as each scenario finishes, so completed
+    work is saved immediately (session state + disk) and survives even a hard crash mid-batch.
+    """
     progress = progress_cb or (lambda _m: None)
+    persist = on_result or (lambda _r: None)
     md = zip_data["metadata"]
     metadata = _build_metadata(md, speaker_role, target_audience, main_topic, knowledge_level)
 
@@ -86,18 +94,36 @@ def run_batch(
             use_tools=scenario in _RAG_SCENARIOS,
             use_llmlingua=use_llmlingua,
         )
-        gateway = LLMGateway(ObservabilityManager())
-        orchestrator = Orchestrator(system_config, gateway=gateway, progress_cb=progress)
-        report = orchestrator.execute_pipeline(
-            metadata=metadata,
-            raw_text=zip_data.get("raw_text", ""),
-            formatted_text=zip_data.get("formatted_text", ""),
-            chunks=parsed_chunks,
-            timeline=parsed_timeline,
-            slide_summaries=parsed_summaries,
-            knowledge_base_bytes=knowledge_base_bytes,
-        )
-        results.append(RunResult(
+        try:
+            gateway = LLMGateway(ObservabilityManager())
+            orchestrator = Orchestrator(system_config, gateway=gateway, progress_cb=progress)
+            report = orchestrator.execute_pipeline(
+                metadata=metadata,
+                raw_text=zip_data.get("raw_text", ""),
+                formatted_text=zip_data.get("formatted_text", ""),
+                chunks=parsed_chunks,
+                timeline=parsed_timeline,
+                slide_summaries=parsed_summaries,
+                knowledge_base_bytes=knowledge_base_bytes,
+            )
+        except Exception as e:
+            # Isolate the failure: build a minimal error-marked report so the run is recorded and
+            # the batch continues. Previously an unexpected error here aborted the WHOLE batch.
+            progress(f"   ❌ Scenariusz {scenario.name} zawiódł: {type(e).__name__}: {e}. Kontynuuję.")
+            report = FinalReport(
+                analysis=DeepAnalysis(
+                    factual_summary=f"[BŁĄD SCENARIUSZA] {type(e).__name__}: {e}",
+                    linguistic_summary="",
+                ),
+                feedback=ConstructiveFeedback(
+                    executive_summary_markdown=f"> ❌ Scenariusz nie powiódł się: {type(e).__name__}: {e}",
+                    actionable_tips=[],
+                ),
+                telemetry=TelemetryReport(),
+                raw_reducer_response=f"[SCENARIO FAILED] {type(e).__name__}: {e}",
+            )
+
+        result = RunResult(
             run_id=uuid.uuid4().hex[:12],
             created_at=datetime.now(timezone.utc).isoformat(),
             scenario_name=scenario.name,
@@ -115,6 +141,8 @@ def run_batch(
             target_audience=metadata.target_audience,
             knowledge_level=metadata.knowledge_level,
             report=report,
-        ))
+        )
+        results.append(result)
+        persist(result)  # incremental save — survives a later crash
         progress(f"   ✅ Zapisano wynik scenariusza {scenario.name}.")
     return results

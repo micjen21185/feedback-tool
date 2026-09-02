@@ -26,6 +26,16 @@ class Config:
     # Set to "low"/"medium"/"high" to re-enable reasoning, or "" to omit the param entirely.
     OLLAMA_REASONING_EFFORT = os.getenv("OLLAMA_REASONING_EFFORT", "none")
 
+    # LLMLingua-2 prompt-compression model. Must be a real HF identifier — the small multilingual
+    # BERT is the right default (handles Polish, task-agnostic, small/fast). The previous value
+    # "llmlingua-small" was NOT a valid model id and caused a load error.
+    LLMLINGUA_MODEL = os.getenv("LLMLINGUA_MODEL", "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank")
+
+    # Fallback model used when the primary is rate-limited / overloaded / over-quota (capacity
+    # errors ONLY — not model-not-found, context-length, auth, or local OOM). Empty = disabled.
+    # gpt-4o-mini is a cheap, high-availability default; set "" to turn fallback off.
+    FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "gpt-4o-mini")
+
     # Lightweight model used for utility tasks (gatekeeper TAK/NIE, query generation, context compression).
     UTILITY_MODEL = os.getenv("UTILITY_MODEL", "ollama/llama3.2:1b")
 
@@ -53,6 +63,10 @@ class Config:
 
     # Directory for map-phase checkpoints so a crashed long run can resume mid-way.
     CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", os.getenv("LLM_BENCHMARK_DB", "llm_benchmark.db"))
+
+    # Where batch run results are written incrementally (one JSON per run). On Cloud Run the FS is
+    # read-only except /tmp, so set RUNS_DIR=/tmp/runs there. Default "runs" for local/GCloud-VM.
+    RUNS_DIR = os.getenv("RUNS_DIR", "runs")
 
     # LLM-as-judge grounding: total characters of transcript the judge may see, split evenly
     # across start/middle/end regions (deterministic — reproducible across runs). Larger =

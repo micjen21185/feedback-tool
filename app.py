@@ -98,6 +98,32 @@ def process_uploaded_zip(uploaded_file):
         return False
 
 
+def _load_runs_from_disk() -> int:
+    """Load previously-saved RunResult JSON files from RUNS_DIR into session state.
+    Recovers a crashed batch's completed scenarios. Returns how many NEW runs were added
+    (skips run_ids already present)."""
+    import os
+    from models.schemas import RunResult
+    existing_ids = {r.run_id for r in st.session_state.runs}
+    added = 0
+    directory = Config.RUNS_DIR
+    if not os.path.isdir(directory):
+        return 0
+    for fname in sorted(os.listdir(directory)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, fname), encoding="utf-8") as fh:
+                r = RunResult.model_validate_json(fh.read())
+            if r.run_id not in existing_ids:
+                st.session_state.runs.append(r)
+                existing_ids.add(r.run_id)
+                added += 1
+        except Exception:
+            continue  # skip corrupt/partial files
+    return added
+
+
 def _judge_config_controls(key_prefix: str) -> dict:
     """Render judge-grounding controls in an expander; return kwargs for EvaluationEngine.
     Shared by the batch section and the manual comparison section."""
@@ -533,6 +559,16 @@ if st.session_state.evaluated_reports:
 st.divider()
 st.header("🧬 Uruchomienie wsadowe (scenariusze 1–4/5)")
 
+# Recovery: reload results saved to disk (e.g. after a crash mid-batch) into the session.
+_lc, _rc = st.columns([1, 2])
+with _lc:
+    if st.button(f"📂 Wczytaj zapisane wyniki z dysku ({Config.RUNS_DIR})"):
+        n = _load_runs_from_disk()
+        st.success(f"Wczytano {n} nowych wyników z dysku.") if n else st.info("Brak nowych wyników na dysku.")
+with _rc:
+    st.caption(f"Wyniki w pamięci sesji: **{len(st.session_state.runs)}** "
+               f"(zapis na dysku: `{Config.RUNS_DIR}/run_*.json`).")
+
 if not st.session_state.zip_data["is_valid"]:
     st.info("Najpierw wczytaj paczkę ZIP powyżej, aby uruchomić tryb wsadowy.")
 else:
@@ -573,6 +609,20 @@ else:
                 bstatus.write(m)
 
 
+            def _persist(r):
+                # Incremental save: append to session state AND write to disk immediately, so a
+                # later scenario crashing never loses already-completed results.
+                st.session_state.runs.append(r)
+                try:
+                    import os
+                    os.makedirs(Config.RUNS_DIR, exist_ok=True)
+                    with open(os.path.join(Config.RUNS_DIR, f"run_{r.run_id}.json"), "w",
+                              encoding="utf-8") as fh:
+                        fh.write(r.model_dump_json(indent=2))
+                except Exception as _e:
+                    bstatus.write(f"   ⚠️ Nie udało się zapisać na dysk: {_e}")
+
+
             new_runs = run_batch(
                 scenarios=chosen_scenarios,
                 zip_data=st.session_state.zip_data,
@@ -584,8 +634,8 @@ else:
                 source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
                 knowledge_base_bytes=_kb_bytes,
                 progress_cb=_bprogress,
+                on_result=_persist,
             )
-            st.session_state.runs.extend(new_runs)
 
             batch_eval = None
             if auto_judge and len(new_runs) >= 1:

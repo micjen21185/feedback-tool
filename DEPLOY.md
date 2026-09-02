@@ -100,6 +100,17 @@ Two behaviours to know:
 Set `HEGEMON_REQUEST_TIMEOUT` **≤** the Cloud Run `--timeout`, or the platform will kill the request before litellm's
 own timeout fires.
 
+### Batch runs & result persistence
+
+The batch runner saves each scenario's result to disk incrementally (`RUNS_DIR/run_<id>.json`) so a crash mid-batch
+never loses completed scenarios; the "Wczytaj zapisane wyniki z dysku" button reloads them. `RUNS_DIR` defaults to
+`runs`. **On Cloud Run the filesystem is read-only except `/tmp`, so set `RUNS_DIR=/tmp/runs`** (add it to
+`--set-env-vars`). Note `/tmp` is ephemeral per-instance — download the batch report (JSON/Markdown) to keep results.
+
+`FALLBACK_MODEL` (default `gpt-4o-mini`): when the primary model hits a capacity error (rate limit / overload / quota),
+the gateway retries once on this model and records it in telemetry (tagged `[fallback→…]`). Needs the fallback
+provider's key configured. Set `""` to disable.
+
 ### Secrets (one-time)
 
 ```
