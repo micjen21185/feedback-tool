@@ -29,9 +29,10 @@ class Config:
     # Longer ceiling for the heavy reduce/monolith calls that produce the full essay.
     HEGEMON_REQUEST_TIMEOUT = int(os.getenv("HEGEMON_REQUEST_TIMEOUT", "3600"))
 
-    # Max OUTPUT tokens for the final report. 4096 is the safe floor (Claude 3.5 Sonnet caps
-    # at 4096 without the max-tokens beta header). Capable models can go to 8192+.
-    HEGEMON_MAX_TOKENS = int(os.getenv("HEGEMON_MAX_TOKENS", "4096"))
+    # Max OUTPUT tokens for the final report. 8192 gives headroom for a deep multi-paragraph
+    # essay on a 40+ min talk. NOTE: claude-3-5-sonnet-20240620 caps at 4096 without a beta
+    # header, so the gateway clamps that model back to 4096 automatically.
+    HEGEMON_MAX_TOKENS = int(os.getenv("HEGEMON_MAX_TOKENS", "8192"))
 
     # Directory for map-phase checkpoints so a crashed long run can resume mid-way.
     CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", os.getenv("LLM_BENCHMARK_DB", "llm_benchmark.db"))

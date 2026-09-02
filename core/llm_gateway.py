@@ -19,6 +19,12 @@ _TRANSIENT_ERRORS = (
     litellm.exceptions.APIConnectionError,
 )
 
+# Hard per-model OUTPUT-token caps that would otherwise error if exceeded.
+# claude-3-5-sonnet-20240620 allows only 4096 output tokens without the max-tokens beta header.
+_MODEL_MAX_OUTPUT_TOKENS = {
+    "claude-3-5-sonnet-20240620": 4096,
+}
+
 
 class LLMGateway:
     def __init__(self, obs_manager: ObservabilityManager, max_concurrent_requests: int = 15,
@@ -61,6 +67,12 @@ class LLMGateway:
         # to a containerized Ollama (GCloud) or a host-installed one (local) via one env var.
         if model.startswith("ollama/") and "api_base" not in call_kwargs:
             call_kwargs["api_base"] = Config.OLLAMA_API_BASE
+
+        # Clamp requested output tokens to the model's hard cap (e.g. Claude 3.5 Sonnet = 4096
+        # without the beta header) so a large HEGEMON_MAX_TOKENS doesn't error on that model.
+        model_cap = _MODEL_MAX_OUTPUT_TOKENS.get(model)
+        if model_cap is not None and call_kwargs.get("max_tokens", 0) > model_cap:
+            call_kwargs["max_tokens"] = model_cap
 
         response = await self._safe_acompletion(retry_on_timeout=retry_on_timeout, **call_kwargs)
 

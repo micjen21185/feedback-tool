@@ -83,8 +83,11 @@ reduce/monolith call alone can exceed 600s. These env vars tune it:
 - `LLM_REQUEST_TIMEOUT` (default `1800`): per-request timeout for the small map-phase calls.
 - `HEGEMON_REQUEST_TIMEOUT` (default `3600`): per-request timeout for the heavy reduce / monolith calls that generate
   the full essay.
-- `HEGEMON_MAX_TOKENS` (default `4096`): max **output** tokens for the report. 4096 is the safe floor (Claude 3.5 Sonnet
-  caps at 4096 without a beta header); raise to `8192` for gpt-4o / capable local models on long talks.
+- `HEGEMON_MAX_TOKENS` (default `8192`): max **output** tokens for the report — headroom for a deep multi-paragraph
+  essay on a 40+ min talk. Claude 3.5 Sonnet is automatically clamped to its 4096 hard cap; gpt-4o and most local models
+  honor higher values. This caps *output* only — the *input*
+  (full transcript for the monolith, or aggregated map findings for the swarm) is bounded by the model's context window
+  and, for the swarm, by the hierarchical reduce in `CombineEngine`.
 
 Two behaviours to know:
 
