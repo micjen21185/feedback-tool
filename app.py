@@ -393,7 +393,9 @@ if submitted and st.session_state.zip_data["is_valid"]:
     st.session_state.evaluated_reports[scenario_choice.name] = {
         "report": report,
         "duration_sec": metadata.total_duration_sec,
-        "raw_excerpt": raw_text[:2000],
+        # Full transcript kept so the judge can build a multi-region (start/middle/end) excerpt.
+        # The engine bounds how much it actually sends via Config.JUDGE_EXCERPT_CHARS.
+        "raw_excerpt": raw_text,
         "input_fingerprint": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
     }
     # Remember which scenario to show by default; the report is rendered OUTSIDE this block

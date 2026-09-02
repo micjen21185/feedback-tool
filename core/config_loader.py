@@ -44,6 +44,19 @@ class Config:
     # Directory for map-phase checkpoints so a crashed long run can resume mid-way.
     CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", os.getenv("LLM_BENCHMARK_DB", "llm_benchmark.db"))
 
+    # LLM-as-judge grounding: total characters of transcript the judge may see, split evenly
+    # across start/middle/end regions (deterministic — reproducible across runs). Larger =
+    # better-grounded correctness scoring, but more judge tokens and risk of the judge itself
+    # hitting lost-in-the-middle. 0 disables multi-region (falls back to a single head slice).
+    JUDGE_EXCERPT_CHARS = int(os.getenv("JUDGE_EXCERPT_CHARS", "6000"))
+    JUDGE_EXCERPT_REGIONS = int(os.getenv("JUDGE_EXCERPT_REGIONS", "3"))
+
+    # Idea 3 — timestamp-targeted probing: for up to N timestamps the report cites, extract a
+    # transcript window (± this many chars) around the mapped position and give it to the judge,
+    # so it can verify the report's claim AT that point is actually supported. 0 disables probing.
+    JUDGE_PROBE_TIMESTAMPS = int(os.getenv("JUDGE_PROBE_TIMESTAMPS", "5"))
+    JUDGE_PROBE_WINDOW_CHARS = int(os.getenv("JUDGE_PROBE_WINDOW_CHARS", "600"))
+
     LOCAL_MODELS = [
         "ollama/llama3.1:70b",
         "ollama/gemma3:27b",

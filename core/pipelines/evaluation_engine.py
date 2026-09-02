@@ -2,6 +2,7 @@ import itertools
 import re
 from typing import Dict, Tuple, List
 
+from core.config_loader import Config
 from models.schemas import (
     FinalReport, JudgeRubric, ScenarioEvaluation, PairwisePreference, EvaluationReport
 )
@@ -35,6 +36,89 @@ class EvaluationEngine:
             f"PRZESŁANIE: {fb.overall_message}",
         ]
         return "\n".join(parts)
+
+    @staticmethod
+    def build_grounding_excerpt(transcript: str, total_chars: int = None, regions: int = None) -> str:
+        """Idea 1: deterministic multi-region transcript excerpt for judge grounding.
+
+        Instead of only the first N chars (which blinds the judge to the middle/end of a long
+        talk — the very lost-in-the-middle region we care about), take evenly-spaced slices
+        from `regions` equal parts of the transcript. Deterministic → reproducible across runs.
+        """
+        transcript = transcript or ""
+        total_chars = Config.JUDGE_EXCERPT_CHARS if total_chars is None else total_chars
+        regions = Config.JUDGE_EXCERPT_REGIONS if regions is None else regions
+
+        if total_chars <= 0 or regions <= 1 or len(transcript) <= total_chars:
+            # Small transcript or feature disabled → just return a head slice (or all of it).
+            return transcript[:total_chars] if total_chars > 0 else transcript
+
+        per_region = total_chars // regions
+        n = len(transcript)
+        region_span = n // regions
+        labels = ["POCZĄTEK", "ŚRODEK", "KONIEC"] if regions == 3 else [f"REGION {i + 1}" for i in range(regions)]
+        parts = []
+        for i in range(regions):
+            start = i * region_span
+            slice_txt = transcript[start:start + per_region].strip()
+            label = labels[i] if i < len(labels) else f"REGION {i + 1}"
+            parts.append(f"[{label} ~{int(100 * start / n)}%]\n{slice_txt}")
+        return "\n\n(…)\n\n".join(parts)
+
+    @staticmethod
+    def _ground_truth_findings(report: FinalReport, max_items: int = 12) -> str:
+        """Idea 2: surface the pipeline's own high-severity findings + scorecard as a checkable
+        anchor. The judge is asked whether the report reflects these (a fidelity/precision check).
+        NOTE: this checks fidelity to what the PIPELINE detected, not to ground-truth reality.
+        """
+        lines = []
+        sc = report.scorecard
+        if sc is not None:
+            lines.append(
+                f"OCENA DETERMINISTYCZNA: łącznie {sc.overall_score}/100 "
+                f"(merytoryka {sc.factual_score}, język {sc.linguistic_score})."
+            )
+        # The report's own analysis is the closest available signal to "what the pipeline flagged".
+        if report.analysis.missed_context:
+            lines.append("POMINIĘTE WĄTKI (wg pipeline): " + "; ".join(report.analysis.missed_context[:max_items]))
+        return "\n".join(lines) if lines else ""
+
+    @staticmethod
+    def build_timestamp_probes(report: FinalReport, transcript: str, duration_sec: float,
+                               max_probes: int = None, window: int = None) -> str:
+        """Idea 3: for the timestamps the report cites, extract the transcript window around each
+        mapped position so the judge can verify the claim AT that point is supported.
+
+        Timestamp→offset mapping assumes ~uniform speech rate (offset ≈ ts/duration × len), so it
+        is approximate; a generous window absorbs the drift. Deterministic (sorted, de-duped).
+        """
+        max_probes = Config.JUDGE_PROBE_TIMESTAMPS if max_probes is None else max_probes
+        window = Config.JUDGE_PROBE_WINDOW_CHARS if window is None else window
+        transcript = transcript or ""
+        if max_probes <= 0 or duration_sec <= 0 or not transcript:
+            return ""
+
+        timestamps = sorted(set(EvaluationEngine._parsed_timestamps(report)))
+        if not timestamps:
+            return ""
+
+        # Evenly sample up to max_probes across the cited timestamps (not just the first few),
+        # so probing covers the spread of the report's claims — including middle/end.
+        if len(timestamps) > max_probes:
+            step = len(timestamps) / max_probes
+            timestamps = [timestamps[int(i * step)] for i in range(max_probes)]
+
+        n = len(transcript)
+        probes = []
+        for ts in timestamps:
+            frac = min(1.0, max(0.0, ts / duration_sec))
+            center = int(frac * n)
+            start = max(0, center - window // 2)
+            snippet = transcript[start:start + window].strip()
+            if snippet:
+                mm, ss = int(ts // 60), int(ts % 60)
+                probes.append(f"[{mm:02d}:{ss:02d}] (transkrypcja w tym miejscu):\n{snippet}")
+        return "\n\n".join(probes)
 
     @staticmethod
     def _density(report: FinalReport) -> Tuple[float, float]:
@@ -123,15 +207,30 @@ class EvaluationEngine:
         return "UNCLEAR"
 
     async def _judge_absolute(self, transcript_excerpt: str, scenario_name: str,
-                              report: FinalReport) -> JudgeRubric:
+                              report: FinalReport, probes: str = "") -> JudgeRubric:
+        ground_truth = self._ground_truth_findings(report)
+        ground_block = f"\n<USTALENIA PIPELINE (kotwica do weryfikacji groundedness)>\n{ground_truth}\n" if ground_truth else ""
+        probe_block = (
+            f"\n<SONDY CZASOWE — transkrypcja przy znacznikach [MM:SS] cytowanych w raporcie>\n{probes}\n"
+            if probes else ""
+        )
         prompt = f"""Jesteś surowym sędzią jakości feedbacku mentorskiego dla wystąpień publicznych.
 Oceniasz JAKOŚĆ poniższego raportu (nie samo wystąpienie).
 
-<FRAGMENT TRANSKRYPCJI (kontekst)>
+<FRAGMENT TRANSKRYPCJI — wiele regionów: początek/środek/koniec>
 {transcript_excerpt}
-
+{ground_block}{probe_block}
 <RAPORT DO OCENY (scenariusz: {scenario_name})>
 {self._report_text(report)}
+
+ZASADY OCENY:
+- correctness/groundedness: sprawdź, czy twierdzenia raportu MAJĄ POKRYCIE w powyższych fragmentach
+  transkrypcji (z różnych części wystąpienia). Karz za twierdzenia bez pokrycia (halucynacje).
+- SONDY CZASOWE: dla każdego znacznika [MM:SS] w raporcie masz fragment transkrypcji z tego miejsca.
+  Sprawdź, czy obserwacja raportu przy tym znaczniku faktycznie znajduje potwierdzenie w tym fragmencie.
+  Jeśli raport twierdzi coś, czego nie ma w odpowiadającym fragmencie — obniż groundedness/correctness.
+- Zwróć uwagę, czy raport pokrywa ŚRODEK i KONIEC wystąpienia, a nie tylko początek.
+- Jeśli podano USTALENIA PIPELINE, sprawdź czy raport je odzwierciedla (nie pomija kluczowych punktów).
 
 Oceń raport w 5 wymiarach 0-10 (actionability, specificity, correctness, tone, groundedness)
 i podaj krótkie uzasadnienie. Zwróć wynik zgodnie ze schematem."""
@@ -171,10 +270,18 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
                        duration_sec: float = 0.0) -> EvaluationReport:
         result = EvaluationReport()
 
+        # Idea 1: build a deterministic multi-region excerpt so the judge sees start/middle/end,
+        # not just the opening. `transcript_excerpt` may be the full transcript or a pre-sliced
+        # string — build_grounding_excerpt is idempotent-safe (returns as-is if short enough).
+        grounded_excerpt = self.build_grounding_excerpt(transcript_excerpt)
+
         # --- Tier 1: absolute rubric per scenario ---
         for name, report in reports.items():
             try:
-                rubric = await self._judge_absolute(transcript_excerpt, name, report)
+                # Idea 3: probe transcript windows at the timestamps THIS report cites, so the
+                # judge can verify each timestamped claim against the source at that point.
+                probes = self.build_timestamp_probes(report, transcript_excerpt, duration_sec)
+                rubric = await self._judge_absolute(grounded_excerpt, name, report, probes=probes)
             except Exception as e:
                 rubric = JudgeRubric(justification=f"[Sędzia zawiódł: {e}]")
             total = rubric.actionability + rubric.specificity + rubric.correctness + rubric.tone + rubric.groundedness
@@ -200,7 +307,7 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
         names = list(reports.keys())
         for a, b in itertools.combinations(names, 2):
             try:
-                pref = await self._judge_pairwise(transcript_excerpt, a, reports[a], b, reports[b])
+                pref = await self._judge_pairwise(grounded_excerpt, a, reports[a], b, reports[b])
                 pref.winner = self._normalize_winner(pref.winner, a, b)
             except Exception as e:
                 pref = PairwisePreference(winner="UNCLEAR", reason=f"[Sędzia zawiódł: {e}]")
