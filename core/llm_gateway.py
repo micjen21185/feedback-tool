@@ -81,6 +81,23 @@ class LLMGateway:
 
         return await _call()
 
+    @staticmethod
+    def _message_text(response: Any) -> str:
+        # Prefer visible content, but fall back to the reasoning/thinking channel. Some Ollama
+        # models (and reasoning-tuned models) put ALL output into `reasoning_content` and leave
+        # `content` empty — reading only `content` yields tokens_out>0 but response_chars=0.
+        if not response.choices:
+            return ""
+        msg = response.choices[0].message
+        content = getattr(msg, "content", None)
+        if content:
+            return content
+        for attr in ("reasoning_content", "reasoning"):
+            alt = getattr(msg, attr, None)
+            if alt:
+                return alt
+        return ""
+
     async def _execute_with_telemetry(self, prompt: str, model: str, agent_role: str, call_kwargs: dict,
                                       retry_on_timeout: bool = True) -> Any:
         start_time = time.time()
@@ -90,6 +107,13 @@ class LLMGateway:
         # to a containerized Ollama (GCloud) or a host-installed one (local) via one env var.
         if model.startswith("ollama/") and "api_base" not in call_kwargs:
             call_kwargs["api_base"] = Config.OLLAMA_API_BASE
+
+        # Suppress (or tune) Ollama's hidden reasoning trace via the standard reasoning_effort
+        # param — the OpenAI-compat endpoint has no think= flag. "none" keeps the whole output
+        # budget for the actual report instead of a reasoning trace that lands in reasoning_content.
+        if (model.startswith("ollama/") and Config.OLLAMA_REASONING_EFFORT
+                and "reasoning_effort" not in call_kwargs):
+            call_kwargs["reasoning_effort"] = Config.OLLAMA_REASONING_EFFORT
 
         # Clamp requested output tokens to the model's hard cap (e.g. Claude 3.5 Sonnet = 4096
         # without the beta header) so a large HEGEMON_MAX_TOKENS doesn't error on that model.
@@ -104,7 +128,7 @@ class LLMGateway:
         tokens_in = response.usage.prompt_tokens if response.usage else 0
         tokens_out = response.usage.completion_tokens if response.usage else 0
 
-        response_text = response.choices[0].message.content if response.choices else ""
+        response_text = self._message_text(response)
 
         if model in Config.LOCAL_MODELS:
             cost_usd = CostEngine.calculate_local_cost(total_time_s, hourly_tco_usd=1.5)
@@ -214,7 +238,7 @@ class LLMGateway:
         call_kwargs.update(kwargs)
         response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs,
                                                       retry_on_timeout=retry_on_timeout)
-        raw_text = response.choices[0].message.content or ""
+        raw_text = self._message_text(response)
 
         try:
             return schema_class.model_validate(json.loads(self._extract_json_object(raw_text)))
@@ -234,4 +258,4 @@ class LLMGateway:
 
         response = await self._execute_with_telemetry(prompt, model, agent_role, call_kwargs,
                                                       retry_on_timeout=retry_on_timeout)
-        return response.choices[0].message.content
+        return self._message_text(response)

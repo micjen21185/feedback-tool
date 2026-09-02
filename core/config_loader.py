@@ -19,6 +19,13 @@ class Config:
     #     (or http://localhost:11434 when running the app outside Docker).
     OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
 
+    # Controls thinking/reasoning on Ollama's OpenAI-compatible endpoint (there is no think=
+    # flag there — Ollama maps the standard `reasoning_effort` param). "none" disables thinking
+    # so the whole output budget goes to the actual report instead of being burned on a hidden
+    # reasoning trace (which was arriving in `reasoning_content` with empty `content`).
+    # Set to "low"/"medium"/"high" to re-enable reasoning, or "" to omit the param entirely.
+    OLLAMA_REASONING_EFFORT = os.getenv("OLLAMA_REASONING_EFFORT", "none")
+
     # Lightweight model used for utility tasks (gatekeeper TAK/NIE, query generation, context compression).
     UTILITY_MODEL = os.getenv("UTILITY_MODEL", "ollama/llama3.2:1b")
 

@@ -135,6 +135,12 @@ OLLAMA_API_BASE=${OLLAMA_API_BASE:-http://ollama:11434}
   cannot reach).
 - **Running the app outside Docker entirely:** the code default is `http://localhost:11434`.
 
+`OLLAMA_REASONING_EFFORT` (default `none`) controls thinking on Ollama's OpenAI-compatible endpoint. Ollama has no
+`think=` flag there — it maps the standard `reasoning_effort` param, so `none` disables the hidden reasoning trace and
+gives the full output budget to the actual report. Set `low`/`medium`/
+`high` to re-enable reasoning, or empty to omit it. Note: a few models ignore this and still emit reasoning; the gateway
+falls back to reading `reasoning_content` so output is never silently lost.
+
 Note: the GPU only provides hardware — an Ollama server process must be running and have the models pulled.
 
 ## 4. Pre-deploy verification
