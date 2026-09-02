@@ -3,6 +3,11 @@ version: '3.8'
 
 services:
   ollama:
-    runtime: nvidia
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      - LD_LIBRARY_PATH=/usr/local/nvidia/lib64
+    volumes:
+      - /var/lib/nvidia:/usr/local/nvidia:ro
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
