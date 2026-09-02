@@ -29,6 +29,11 @@ class Config:
     # Lightweight model used for utility tasks (gatekeeper TAK/NIE, query generation, context compression).
     UTILITY_MODEL = os.getenv("UTILITY_MODEL", "ollama/llama3.2:1b")
 
+    # Per-request timeout (seconds) for the small MAP-phase calls. Much shorter than the default
+    # so a hung/unreachable Ollama fails FAST per call instead of freezing for the full
+    # LLM_REQUEST_TIMEOUT (which is sized for the heavy reduce). Transient blips still retry.
+    MAP_REQUEST_TIMEOUT = int(os.getenv("MAP_REQUEST_TIMEOUT", "120"))
+
     # Per-request LLM timeout (seconds). litellm defaults to 600; long talks + slow local
     # models on the monolith / Hegemon reduce phase routinely exceed that.
     LLM_REQUEST_TIMEOUT = int(os.getenv("LLM_REQUEST_TIMEOUT", "1800"))

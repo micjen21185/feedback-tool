@@ -85,7 +85,8 @@ Analiza LLM: Raportuj krytyczny błąd rejestru: "Niedopuszczalny wulgaryzm i sl
             schema_class=LinguisticOutput,
             model=self.model,
             agent_role="Linguistic Agent (Map Phase)",
-            max_tokens=Config.MAP_MAX_TOKENS
+            max_tokens=Config.MAP_MAX_TOKENS,
+            timeout=Config.MAP_REQUEST_TIMEOUT
         )
 
         output.chunk_id = f"chunk_{chunk.chunk_meta.index}"

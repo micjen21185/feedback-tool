@@ -26,7 +26,8 @@ Przeanalizuj powyższą wypowiedź. Jeśli znajdziesz błędy merytoryczne (nieb
             schema_class=FactualOutput,
             model=model,
             agent_role="Factual Agent (Zero-Shot)",
-            max_tokens=Config.MAP_MAX_TOKENS
+            max_tokens=Config.MAP_MAX_TOKENS,
+            timeout=Config.MAP_REQUEST_TIMEOUT
         )
 
         output.chunk_id = f"chunk_{chunk.chunk_meta.index}"
