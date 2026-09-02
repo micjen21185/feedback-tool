@@ -467,6 +467,10 @@ else:
                 "Osadzenie w faktach": se.rubric.groundedness,
                 "Tokeny (we+wy)": se.total_tokens_in + se.total_tokens_out,
                 "Koszt ($)": round(se.total_cost_usd, 5),
+                # Cost per quality point (cost / rubric_total). LOWER = more quality per dollar.
+                # This operationalizes the money-vs-quality tradeoff: a scenario that spends more
+                # but scores proportionally higher isn't necessarily worse value.
+                "Koszt / pkt jakości ($)": round(se.total_cost_usd / se.rubric_total, 6) if se.rubric_total else None,
                 "Gęstość WE (znaki/token)": se.input_token_density,
                 "Gęstość WY (znaki/token)": se.output_token_density,
                 "Pokrycie (regiony)": ", ".join(
