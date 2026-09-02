@@ -277,6 +277,7 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
 
         # --- Tier 1: absolute rubric per scenario ---
         for name, report in reports.items():
+            probes = ""
             try:
                 # Idea 3: probe transcript windows at the timestamps THIS report cites, so the
                 # judge can verify each timestamped claim against the source at that point.
@@ -288,6 +289,13 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
             in_density, out_density = self._density(report)
             pos_recall = self.positional_recall(report, duration_sec)
             red_fidelity = self.reduce_fidelity(report, duration_sec)
+            # Option 2: record exactly what the judge saw, so its groundedness score is auditable.
+            ground_truth = self._ground_truth_findings(report)
+            evidence = (
+                f"=== FRAGMENTY TRANSKRYPCJI (start/środek/koniec) ===\n{grounded_excerpt}\n\n"
+                f"=== USTALENIA PIPELINE ===\n{ground_truth or '(brak)'}\n\n"
+                f"=== SONDY CZASOWE ===\n{probes or '(brak — raport nie cytował znaczników [MM:SS])'}"
+            )
             result.per_scenario.append(ScenarioEvaluation(
                 scenario_name=name,
                 rubric=rubric,
@@ -301,6 +309,7 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
                 positional_recall=pos_recall,
                 reduce_fidelity=red_fidelity,
                 lost_in_middle_flag=self._lost_in_middle(pos_recall),
+                judge_evidence=evidence,
             ))
 
         # --- Tier 2: pairwise preferences over all scenario pairs ---

@@ -482,6 +482,48 @@ else:
             })
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
 
+        # --- Option 1: Δ vs. baseline — direct A/B comparison against a chosen reference scenario ---
+        per = eval_report.per_scenario
+        if len(per) >= 2:
+            st.subheader("📐 Porównanie do bazy (Δ)")
+            st.caption(
+                "Wybierz scenariusz bazowy (np. Monolith Naked). Pozostałe pokazane jako RÓŻNICA względem niego "
+                "— dodatnia jakość/osadzenie = lepiej, dodatni koszt = drożej."
+            )
+            names = [se.scenario_name for se in per]
+            base_name = st.selectbox("Scenariusz bazowy:", options=names, index=0, key="ab_baseline")
+            base = next(se for se in per if se.scenario_name == base_name)
+            delta_rows = []
+            for se in per:
+                if se.scenario_name == base_name:
+                    continue
+                delta_rows.append({
+                    "Scenariusz": se.scenario_name,
+                    "Δ Jakość (0-50)": round(se.rubric_total - base.rubric_total, 1),
+                    "Δ Osadzenie w faktach": se.rubric.groundedness - base.rubric.groundedness,
+                    "Δ Trafność": se.rubric.correctness - base.rubric.correctness,
+                    "Δ Koszt ($)": round(se.total_cost_usd - base.total_cost_usd, 5),
+                    "Lost-in-middle (baza→ten)": f"{'TAK' if base.lost_in_middle_flag else 'nie'} → "
+                                                 f"{'TAK' if se.lost_in_middle_flag else 'nie'}",
+                })
+            if delta_rows:
+                st.dataframe(pd.DataFrame(delta_rows), hide_index=True, use_container_width=True)
+
+        # --- Option 2: what the judge actually saw + its reasoning (auditability) ---
+        st.subheader("🔎 Dowody sędziego (audyt osadzenia)")
+        st.caption(
+            "Sprawdź, DLACZEGO sędzia dał daną ocenę osadzenia — jego uzasadnienie oraz materiał, który widział.")
+        for se in per:
+            with st.expander(f"{se.scenario_name} — groundedness {se.rubric.groundedness}/10, "
+                             f"correctness {se.rubric.correctness}/10"):
+                if se.rubric.justification:
+                    st.markdown(f"**Uzasadnienie sędziego:** {se.rubric.justification}")
+                if se.judge_evidence:
+                    st.text_area("Materiał przekazany sędziemu", se.judge_evidence, height=300,
+                                 key=f"evidence_{se.scenario_name}")
+                else:
+                    st.info("Brak zapisanego materiału dowodowego.")
+
         if eval_report.pairwise:
             st.subheader("⚔️ Preferencje parami")
             for pref in eval_report.pairwise:

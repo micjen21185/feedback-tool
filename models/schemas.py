@@ -355,6 +355,10 @@ class ScenarioEvaluation(BaseModel):
         default=False,
         description="True, jeśli środkowy region ma wyraźnie niższe pokrycie niż skrajne."
     )
+    # Transparency (Option 2): the exact grounding evidence the judge was shown — the multi-region
+    # excerpt + timestamp probes + pipeline anchor. Lets the user verify WHY a groundedness score
+    # was given, instead of trusting the number blindly.
+    judge_evidence: str = Field(default="", description="Materiał dowodowy przekazany sędziemu (do wglądu).")
 
 
 class PairwisePreference(BaseModel):
