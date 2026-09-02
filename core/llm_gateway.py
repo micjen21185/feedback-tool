@@ -4,7 +4,7 @@ import litellm
 import re
 import time
 from pydantic import BaseModel, ValidationError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from typing import Any, List, Optional
 
 from core.config_loader import Config
@@ -24,6 +24,22 @@ _TRANSIENT_ERRORS = (
 _MODEL_MAX_OUTPUT_TOKENS = {
     "claude-3-5-sonnet-20240620": 4096,
 }
+
+# Substrings that indicate the local Ollama runner was killed (almost always OOM). Retrying
+# these is pointless — the memory situation is identical on the next attempt — so we fail fast.
+_FATAL_LOCAL_MARKERS = (
+    "process has terminated",
+    'signal "killed"',
+    "signal: killed",
+    "out of memory",
+    "cudamalloc",
+    "failed to allocate",
+)
+
+
+def _is_fatal_local_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _FATAL_LOCAL_MARKERS)
 
 
 class LLMGateway:
@@ -46,10 +62,17 @@ class LLMGateway:
         # genuinely large* just burns 4x the wall-clock and times out again anyway.
         retry_types = _TRANSIENT_ERRORS + ((litellm.exceptions.Timeout,) if retry_on_timeout else ())
 
+        def _should_retry(exc: BaseException) -> bool:
+            # Never retry an OOM / killed-runner error, even though it arrives as an
+            # APIConnectionError — the memory situation won't change on the next try.
+            if _is_fatal_local_error(exc):
+                return False
+            return isinstance(exc, retry_types)
+
         @retry(
             stop=stop_after_attempt(4),
             wait=wait_exponential(multiplier=1, min=2, max=10),
-            retry=retry_if_exception_type(retry_types),
+            retry=retry_if_exception(_should_retry),
             reraise=True
         )
         async def _call() -> Any:

@@ -322,15 +322,36 @@ if submitted and st.session_state.zip_data["is_valid"]:
 
         knowledge_base_bytes = uploaded_kb_pdf.getvalue() if uploaded_kb_pdf is not None else None
 
-        report = orchestrator.execute_pipeline(
-            metadata=metadata,
-            raw_text=raw_text,
-            formatted_text=formatted_text,
-            chunks=parsed_chunks,
-            timeline=parsed_timeline,
-            slide_summaries=parsed_summaries,
-            knowledge_base_bytes=knowledge_base_bytes
-        )
+        try:
+            report = orchestrator.execute_pipeline(
+                metadata=metadata,
+                raw_text=raw_text,
+                formatted_text=formatted_text,
+                chunks=parsed_chunks,
+                timeline=parsed_timeline,
+                slide_summaries=parsed_summaries,
+                knowledge_base_bytes=knowledge_base_bytes
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            is_oom = any(m in msg for m in (
+                "process has terminated", 'signal "killed"', "signal: killed",
+                "out of memory", "cudamalloc", "failed to allocate"
+            ))
+            if is_oom:
+                st.error(
+                    "❌ Serwer Ollama został zabity (prawdopodobnie brak pamięci — OOM).\n\n"
+                    f"Model **{system_config.hegemon_model}** nie zmieścił się w pamięci GPU/RAM "
+                    "dla tak długiego nagrania. Na karcie **NVIDIA L4 (24 GB)** model 70B się nie mieści.\n\n"
+                    "**Co zrobić:**\n"
+                    "- Wybierz mniejszy model Hegemona (np. `ollama/gemma3:27b`), lub\n"
+                    "- Użyj scenariusza **Roju (Swarm)** zamiast monolitu — dzieli tekst na fragmenty "
+                    "i zużywa znacznie mniej pamięci na długich wystąpieniach, lub\n"
+                    "- Użyj modelu chmurowego (gpt-4o / Claude), który nie podlega lokalnemu OOM."
+                )
+            else:
+                st.error(f"❌ Analiza nie powiodła się: {e}")
+            st.stop()
 
     st.success("Analiza zakończona sukcesem!")
 

@@ -59,8 +59,8 @@ class Config:
         "gpt-4o",
         "gpt-4o-mini",
         "claude-3-5-sonnet-20240620",
-        "gemini/gemini-2.5-pro",
-        "gemini/gemini-2.5-flash"
+        "gemini/gemini-3.1-pro",
+        "gemini/gemini-3.6-flash"
     ]
 
     @classmethod
