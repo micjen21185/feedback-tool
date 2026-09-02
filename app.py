@@ -44,6 +44,11 @@ if 'active_report_scenario' not in st.session_state:
 if 'runs' not in st.session_state:
     st.session_state.runs = []
 
+# Cached MapResults (swarm map+combine output) — reusable to run the reduce with different
+# Hegemon models on identical evidence without re-running the expensive map phase.
+if 'map_results' not in st.session_state:
+    st.session_state.map_results = []
+
 
 def process_uploaded_zip(uploaded_file):
     try:
@@ -96,6 +101,31 @@ def process_uploaded_zip(uploaded_file):
     except Exception as e:
         st.error(f"❌ Błąd przetwarzania paczki ZIP: {e}")
         return False
+
+
+def _load_maps_from_disk() -> int:
+    """Load previously-saved MapResult JSON files from MAPS_DIR into session state.
+    Recovers expensive MAP phases after a restart. Returns how many NEW maps were added."""
+    import os
+    from models.schemas import MapResult
+    existing_ids = {m.map_id for m in st.session_state.map_results}
+    added = 0
+    directory = Config.MAPS_DIR
+    if not os.path.isdir(directory):
+        return 0
+    for fname in sorted(os.listdir(directory)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, fname), encoding="utf-8") as fh:
+                m = MapResult.model_validate_json(fh.read())
+            if m.map_id not in existing_ids:
+                st.session_state.map_results.append(m)
+                existing_ids.add(m.map_id)
+                added += 1
+        except Exception:
+            continue
+    return added
 
 
 def _load_runs_from_disk() -> int:
@@ -670,6 +700,124 @@ else:
             file_name=f"batch_{export.created_at[:19].replace(':', '-')}.md",
             mime="text/markdown"
         )
+
+# =========================================================================
+# SEKCJA MAP/REDUCE: uruchom drogą fazę MAP raz, potem porównuj reduktory (Hegemon) na tych samych danych
+# =========================================================================
+st.divider()
+st.header("🧩 Faza MAP osobno + porównanie reduktorów")
+st.caption(
+    "Uruchom kosztowną fazę MAP (agenci roju) RAZ, a następnie odpalaj fazę REDUCE (Hegemon) na "
+    "różnych modelach na IDENTYCZNYCH danych — bez ponownego mapowania. Tylko scenariusze roju (3–5)."
+)
+
+# Recovery: reload MAP phases saved to disk (survive restarts) into the session.
+_mlc, _mrc = st.columns([1, 2])
+with _mlc:
+    if st.button(f"📂 Wczytaj zapisane fazy MAP z dysku ({Config.MAPS_DIR})"):
+        n = _load_maps_from_disk()
+        st.success(f"Wczytano {n} nowych faz MAP.") if n else st.info("Brak nowych faz MAP na dysku.")
+with _mrc:
+    st.caption(f"Fazy MAP w pamięci sesji: **{len(st.session_state.map_results)}** "
+               f"(zapis: `{Config.MAPS_DIR}/map_*.json`).")
+
+if st.session_state.zip_data["is_valid"]:
+    _swarm_scenarios = [ExperimentScenario.SWARM_NAIVE_NO_RAG, ExperimentScenario.SWARM_NAIVE_RAG_WEB,
+                        ExperimentScenario.SWARM_PRESENTATION_RAG_WEB]
+    map_scenario = st.selectbox(
+        "Scenariusz dla fazy MAP:", options=_swarm_scenarios,
+        format_func=lambda x: f"{x.value} - {x.name}", key="map_scenario"
+    )
+    map_kb_pdf = st.file_uploader("(Opcjonalnie) PDF bazy wiedzy (scenariusze 4/5)", type="pdf", key="map_kb")
+    if st.button("🧠 Uruchom TYLKO fazę MAP", key="run_map_only"):
+        _missing = check_ollama_models([factual_model, linguistic_model, Config.UTILITY_MODEL])
+        if _missing:
+            st.error("❌ Brakuje modeli MAP w Ollama: " + ", ".join(f"`{m}`" for m in _missing))
+            st.stop()
+        _cfg = SystemConfiguration(
+            scenario=map_scenario, hegemon_model=hegemon_model,
+            agent_models=AgentModelsConfig(factual_model=factual_model, linguistic_model=linguistic_model),
+            use_tools=map_scenario in (ExperimentScenario.SWARM_NAIVE_RAG_WEB,
+                                       ExperimentScenario.SWARM_PRESENTATION_RAG_WEB),
+            use_llmlingua=use_llmlingua_switch,
+        )
+        with st.status("Faza MAP pracuje…", expanded=True) as mstatus:
+            _gw = LLMGateway(ObservabilityManager())
+            _orch = Orchestrator(_cfg, gateway=_gw, progress_cb=lambda m: mstatus.write(m))
+            _zd = st.session_state.zip_data
+            _mr = _orch.execute_map_only(
+                metadata=LectureMetadata(
+                    speaker_role=speaker_role, target_audience=target_audience, main_topic=main_topic,
+                    knowledge_level=knowledge_level,
+                    total_duration_sec=_zd["metadata"].get("total_duration_sec", 0.0),
+                    total_words=_zd["metadata"].get("total_words", 0),
+                ),
+                chunks=[ChunkPayload(**c) for c in _zd.get("chunks", [])],
+                timeline=TimelinePayload(**_zd["timeline"]) if _zd.get("timeline") else None,
+                slide_summaries={k: SlideSummary(**v) for k, v in _zd.get("slide_summaries", {}).items()},
+                knowledge_base_bytes=map_kb_pdf.getvalue() if map_kb_pdf is not None else None,
+                source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
+                input_fingerprint=hashlib.sha256(_zd["raw_text"].encode("utf-8")).hexdigest(),
+            )
+            st.session_state.map_results.append(_mr)
+            try:
+                import os
+
+                os.makedirs(Config.MAPS_DIR, exist_ok=True)
+                with open(os.path.join(Config.MAPS_DIR, f"map_{_mr.map_id}.json"), "w",
+                          encoding="utf-8") as _fh:
+                    _fh.write(_mr.model_dump_json(indent=2))
+            except Exception as _e:
+                mstatus.write(f"   ⚠️ Nie udało się zapisać fazy MAP na dysk: {_e}")
+            mstatus.update(label="Faza MAP zakończona.", state="complete")
+        st.success(f"✅ Zapisano fazę MAP: {_mr.map_id} ({_mr.total_windows} okien).")
+        st.download_button("⬇️ Pobierz fazę MAP (JSON)", data=_mr.model_dump_json(indent=2),
+                           file_name=f"map_{_mr.map_id}.json", mime="application/json")
+else:
+    st.info("Wczytaj paczkę ZIP, aby uruchomić fazę MAP.")
+
+# Reduce from a saved MapResult with a chosen Hegemon model.
+if st.session_state.map_results:
+    st.subheader("♻️ Reduce z zapisanej fazy MAP")
+    _mr_labels = {m.display_label(): m for m in st.session_state.map_results}
+    _chosen_map_label = st.selectbox("Wybierz zapisaną fazę MAP:", options=list(_mr_labels.keys()),
+                                     key="reduce_map_pick")
+    _reduce_hegemon = st.selectbox("Model Hegemona (reduktora):", options=Config.get_all_models(),
+                                   index=Config.get_all_models().index(hegemon_model)
+                                   if hegemon_model in Config.get_all_models() else 0,
+                                   key="reduce_hegemon_pick")
+    if st.button("🏛️ Uruchom REDUCE na wybranym modelu", key="run_reduce_from_map"):
+        _mr = _mr_labels[_chosen_map_label]
+        if check_ollama_models([_reduce_hegemon]):
+            st.error(f"❌ Model `{_reduce_hegemon}` nie jest dostępny w Ollama.")
+            st.stop()
+        _cfg = SystemConfiguration(
+            scenario=ExperimentScenario[_mr.scenario_name], hegemon_model=_reduce_hegemon,
+            agent_models=AgentModelsConfig(factual_model=_mr.factual_model, linguistic_model=_mr.linguistic_model),
+        )
+        with st.status(f"REDUCE (Hegemon={_reduce_hegemon}) na MAP {_mr.map_id}…", expanded=True) as rstatus:
+            _gw = LLMGateway(ObservabilityManager())
+            _orch = Orchestrator(_cfg, gateway=_gw, progress_cb=lambda m: rstatus.write(m))
+            _report = _orch.execute_reduce_from_map(_mr)
+            # Store as a RunResult so it appears in comparison/export like any other run.
+            from datetime import datetime as _dt, timezone as _tz
+            import uuid as _uuid
+            from models.schemas import RunModels, RunResult
+
+            _rr = RunResult(
+                run_id=_uuid.uuid4().hex[:12], created_at=_dt.now(_tz.utc).isoformat(),
+                scenario_name=f"{_mr.scenario_name} (reduce:{_reduce_hegemon.split('/')[-1]})",
+                models=RunModels(hegemon_model=_reduce_hegemon, factual_model=_mr.factual_model,
+                                 linguistic_model=_mr.linguistic_model, utility_model=_mr.utility_model),
+                input_fingerprint=_mr.input_fingerprint, source_label=_mr.source_label,
+                duration_sec=_mr.duration_sec, main_topic=_mr.main_topic,
+                target_audience=_mr.target_audience, knowledge_level=_mr.knowledge_level,
+                report=_report,
+            )
+            st.session_state.runs.append(_rr)
+            rstatus.update(label="REDUCE zakończony.", state="complete")
+        st.success(f"✅ Reduce gotowy (Hegemon={_reduce_hegemon}). Zapisano jako run {_rr.run_id}.")
+        render_report(_report)
 
 # =========================================================================
 # SEKCJA EWALUACJI / PORÓWNANIA SCENARIUSZY (LLM-as-judge + telemetria)

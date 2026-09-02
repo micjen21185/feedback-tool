@@ -26,8 +26,10 @@ class SwarmNaivePipeline:
         logger.info("[swarm] %s", msg)
         self._progress_cb(msg)
 
-    async def execute(self, metadata: LectureMetadata, chunks: List[ChunkPayload],
-                      presentation_context: str = "", slide_coverage: list = None) -> HegemonOutput:
+    async def run_map_combine(self, metadata: LectureMetadata, chunks: List[ChunkPayload],
+                              slide_coverage: list = None) -> dict:
+        """MAP + COMBINE phases only (the expensive ~60 agent calls). Returns the combine output
+        as a dict — reusable to run the reduce with different Hegemon models without re-mapping."""
         batch_size = 4
         batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
         self._progress(f"🧠 Faza MAP: {len(chunks)} chunków w {len(batches)} batchach (po {batch_size}).")
@@ -59,17 +61,41 @@ class SwarmNaivePipeline:
         self._progress("🔗 Faza COMBINE: agregacja i redukcja ustaleń z chunków (deterministyczna)…")
         thematic_blocks, behavioral_profiles = await self.combine_engine.aggregate_dual_track(mapped_results, metadata)
         scorecard = self.combine_engine.compute_scorecard(ling_results, fact_results, slide_coverage)
+        unverified_claims = self.combine_engine.collect_unverified_claims(fact_results)
         self._progress(
             f"   ✅ Zredukowano do {len(thematic_blocks)} bloków merytorycznych "
             f"i {len(behavioral_profiles)} profili behawioralnych. Ocena: {scorecard.overall_score}/100."
         )
 
-        # Claims not confirmed against any trusted source (RAG/slides) — computed deterministically
-        # from the map's verification_status. Passed to the reducer AND kept as the authoritative list.
-        unverified_claims = self.combine_engine.collect_unverified_claims(fact_results)
+        map_ts = set()
+        for r in ling_results:
+            if r.anomaly_texts():
+                map_ts.add(round(r.start_time, 1))
+        for r in fact_results:
+            if r.error_texts():
+                map_ts.add(round(r.start_time, 1))
+
+        return {
+            "thematic_blocks": thematic_blocks,
+            "behavioral_profiles": behavioral_profiles,
+            "scorecard": scorecard,
+            "unverified_claims": unverified_claims,
+            "map_timestamps": sorted(map_ts),
+            "total_windows": len(fact_results),
+            "substantive_windows": sum(1 for r in fact_results if (r.thematic_summary or "").strip()),
+        }
+
+    async def run_reduce(self, metadata: LectureMetadata, combine: dict,
+                         presentation_context: str = "") -> HegemonOutput:
+        """REDUCE phase only — takes a combine-output dict (from run_map_combine or a saved
+        MapResult) and produces the report. Swappable Hegemon model = compare reducers on
+        identical evidence without re-running the map."""
+        thematic_blocks = combine["thematic_blocks"]
+        behavioral_profiles = combine["behavioral_profiles"]
+        scorecard = combine.get("scorecard")
+        unverified_claims = combine.get("unverified_claims", [])
 
         self._progress("🏛️ Faza REDUCE: Hegemon generuje raport końcowy…")
-        # Pre-build the aggregated reducer input so it's captured even if the reduce throws.
         fallback_input = (
             f"<CHRONOLOGICZNE BLOKI MERYTORYCZNE>\n{chr(10).join(thematic_blocks)}\n\n"
             f"<CHRONOLOGICZNE PROFILE BEHAWIORALNE>\n{chr(10).join(behavioral_profiles)}"
@@ -85,9 +111,6 @@ class SwarmNaivePipeline:
             )
             self._progress("   ✅ Hegemon zakończył raport.")
         except Exception as e:
-            # The reduce call failed. Do NOT lose the whole run: the scorecard is deterministic
-            # and the map findings are aggregated, so return a degraded-but-valid report that
-            # ALSO records the aggregated input + the error, so the Debug tab shows the cause.
             logger.error("Hegemon reduce failed (%r). Returning degraded report from map findings.", e)
             self._progress(f"   ⚠️ Hegemon zawiódł ({type(e).__name__}: {e}). Zwracam raport awaryjny z fazy map.")
             report = self._build_fallback_report(
@@ -95,26 +118,18 @@ class SwarmNaivePipeline:
                 reducer_input=fallback_input, error=f"{type(e).__name__}: {e}"
             )
         report.scorecard = scorecard
-
-        # Timestamps of chunks that produced ANY finding in the map phase — used by the
-        # evaluator to measure how much of each time-region survived into the final report.
-        map_ts = set()
-        for r in ling_results:
-            if r.anomaly_texts():
-                map_ts.add(round(r.start_time, 1))
-        for r in fact_results:
-            if r.error_texts():
-                map_ts.add(round(r.start_time, 1))
-        # Authoritative (deterministic) unverified list — overrides whatever the essay re-mentioned.
+        # Authoritative (deterministic) fields carried from the combine phase.
         report.analysis.unverified_claims = unverified_claims
-
-        report.map_timestamps = sorted(map_ts)
-
-        # Non-penalizing substance density: how many map windows carried substantive factual
-        # content (a non-empty thematic summary). Observability only — does NOT affect the score.
-        report.total_windows = len(fact_results)
-        report.substantive_windows = sum(1 for r in fact_results if (r.thematic_summary or "").strip())
+        report.map_timestamps = combine.get("map_timestamps", [])
+        report.total_windows = combine.get("total_windows", 0)
+        report.substantive_windows = combine.get("substantive_windows", 0)
         return report
+
+    async def execute(self, metadata: LectureMetadata, chunks: List[ChunkPayload],
+                      presentation_context: str = "", slide_coverage: list = None) -> HegemonOutput:
+        # Full swarm = map+combine then reduce, in one call (backward-compatible).
+        combine = await self.run_map_combine(metadata, chunks, slide_coverage)
+        return await self.run_reduce(metadata, combine, presentation_context)
 
     async def _process_batch(self, batch: List[ChunkPayload], metadata: LectureMetadata) -> List[Tuple[Any, Any]]:
         batch_results = []

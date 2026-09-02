@@ -407,6 +407,43 @@ class RunModels(BaseModel):
     utility_model: str = ""
 
 
+class MapResult(BaseModel):
+    """Serializable output of the swarm's MAP + COMBINE phases — the expensive part (~60 agent
+    calls). Reusable: feed it into the reduce with ANY Hegemon model to compare reducers on
+    IDENTICAL evidence, without re-running the map. Persists the combine output (what the reduce
+    consumes), not raw per-chunk results."""
+    map_id: str = Field(description="Unikalny identyfikator fazy map.")
+    created_at: str = ""
+    scenario_name: str = ""
+    input_fingerprint: str = ""
+    source_label: str = ""
+    # Models used for the MAP phase (the reduce model is chosen later, separately).
+    factual_model: str = ""
+    linguistic_model: str = ""
+    utility_model: str = ""
+    # Combine output — exactly what the Hegemon reduce consumes.
+    thematic_blocks: List[str] = Field(default_factory=list)
+    behavioral_profiles: List[str] = Field(default_factory=list)
+    scorecard: Optional[ScoreCard] = None
+    unverified_claims: List[str] = Field(default_factory=list)
+    map_timestamps: List[float] = Field(default_factory=list)
+    substantive_windows: int = 0
+    total_windows: int = 0
+    # Presentation extras (scenario 5) so a saved presentation map can still be reduced faithfully.
+    presentation_context: str = ""
+    duration_sec: float = 0.0
+    target_audience: str = ""
+    knowledge_level: str = ""
+    main_topic: str = ""
+    speaker_role: str = ""
+    # Map-phase telemetry (so the reused reduce can be costed on top of the already-spent map cost).
+    map_telemetry: Optional[TelemetryReport] = None
+
+    def display_label(self) -> str:
+        t = self.created_at[11:16] if len(self.created_at) >= 16 else self.created_at
+        return f"{self.scenario_name} · MAP(F={self.factual_model.split('/')[-1]}) · {t}"
+
+
 class RunResult(BaseModel):
     """One complete pipeline execution — the unit of storage/comparison/export. Keyed by a
     composite identity so the SAME scenario run with DIFFERENT models is stored separately."""
