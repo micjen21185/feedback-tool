@@ -21,9 +21,14 @@ from tools.knowledge_engine import KnowledgeEngine
 
 
 class Orchestrator:
-    def __init__(self, config: SystemConfiguration, gateway):
+    def __init__(self, config: SystemConfiguration, gateway, progress_cb=None):
         self.config = config
         self.gateway = gateway
+        # Optional callback(str) for live step logging in the UI. No-op if not provided.
+        self._progress = progress_cb or (lambda _msg: None)
+
+    def _log(self, msg: str):
+        self._progress(msg)
 
     def execute_pipeline(
             self,
@@ -39,6 +44,10 @@ class Orchestrator:
         chunks = chunks or []
         slide_summaries = slide_summaries or {}
         start_time = time.time()
+
+        self._log(f"▶️ Start scenariusza: {self.config.scenario.name}")
+        if chunks:
+            self._log(f"📦 Wczytano {len(chunks)} chunków do analizy (faza map).")
 
         if self.config.scenario == ExperimentScenario.MONOLITH_NAKED:
             hegemon_out = asyncio.run(self._execute_scenario_1_monolith_naked(metadata, raw_text))
@@ -80,7 +89,9 @@ class Orchestrator:
             feedback=hegemon_out.feedback,
             telemetry=telemetry,
             scorecard=hegemon_out.scorecard,
-            map_timestamps=hegemon_out.map_timestamps
+            map_timestamps=hegemon_out.map_timestamps,
+            raw_reducer_response=hegemon_out.raw_reducer_response,
+            reducer_input=hegemon_out.reducer_input
         )
 
     async def _execute_scenario_1_monolith_naked(self, metadata, raw_text) -> HegemonOutput:
@@ -122,7 +133,8 @@ class Orchestrator:
             combine_engine=combine_engine,
             hegemon=hegemon_reducer,
             config=self.config,
-            use_tools=use_tools
+            use_tools=use_tools,
+            progress_cb=self._progress
         ), knowledge_engine
 
     async def _execute_scenario_3_swarm_naive_no_rag(self, metadata: LectureMetadata,

@@ -107,7 +107,8 @@ def render_report(report):
         if sc.slide_coverage_score is not None:
             sm3.metric("Pokrycie slajdów", _fmt_score(sc.slide_coverage_score))
 
-    tab1, tab2, tab3 = st.tabs(["🧠 Analiza i Detale", "💡 Feedback", "📊 Raport Kosztowy z Roju (Telemetry)"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["🧠 Analiza i Detale", "💡 Feedback", "📊 Raport Kosztowy z Roju (Telemetry)", "🔬 Debug (surowe dane)"])
 
     with tab1:
         st.write("### Podsumowanie Merytoryczne")
@@ -183,6 +184,30 @@ def render_report(report):
             )
         else:
             st.info("Brak szczegółowych wpisów telemetrycznych z Roju.")
+
+    with tab4:
+        # Requests #1 & #2: see what the reducer/monolith actually produced, and the aggregated
+        # data that was fed into it (for the swarm, this is the reduced map output).
+        st.write("### 📥 Dane wejściowe do reduktora (Hegemon / Monolit)")
+        st.caption(
+            "To co model dostał na wejściu. Dla Roju (Swarm) to zagregowany i zredukowany wynik "
+            "wszystkich chunków z fazy map. Dla monolitu — pełny prompt z transkrypcją."
+        )
+        if report.reducer_input:
+            st.text_area("reducer_input", report.reducer_input, height=300, key="dbg_reducer_input")
+        else:
+            st.info("Brak zapisanego wejścia reduktora.")
+
+        st.write("### 📤 Surowa odpowiedź modelu")
+        st.caption(
+            "Dokładnie to, co model wygenerował — zanim spróbowaliśmy wyciągnąć znaczniki. "
+            "Jeśli analiza/feedback są puste, tutaj zobaczysz dlaczego (np. model nie użył tagów)."
+        )
+        if report.raw_reducer_response:
+            st.text_area("raw_reducer_response", report.raw_reducer_response, height=400,
+                         key="dbg_raw_response")
+        else:
+            st.info("Brak zapisanej surowej odpowiedzi.")
 
 
 st.sidebar.header("⚙️ Konfiguracja Systemu")
@@ -314,11 +339,17 @@ if submitted and st.session_state.zip_data["is_valid"]:
     parsed_summaries = {k: SlideSummary(**v) for k, v in slide_summaries.items()}
     parsed_timeline = TimelinePayload(**timeline) if timeline else None
 
-    with st.spinner(f"Orkiestrator pracuje (Scenariusz: {scenario_choice.name})..."):
+    with st.status(f"Orkiestrator pracuje (Scenariusz: {scenario_choice.name})...", expanded=True) as status:
         obs_manager = ObservabilityManager()
         real_gateway = LLMGateway(obs_manager)
 
-        orchestrator = Orchestrator(system_config, gateway=real_gateway)
+
+        # Live step log ("thinking process"): each pipeline milestone is written into the status box.
+        def _progress(msg: str):
+            status.write(msg)
+
+
+        orchestrator = Orchestrator(system_config, gateway=real_gateway, progress_cb=_progress)
 
         knowledge_base_bytes = uploaded_kb_pdf.getvalue() if uploaded_kb_pdf is not None else None
 
@@ -338,6 +369,7 @@ if submitted and st.session_state.zip_data["is_valid"]:
                 "process has terminated", 'signal "killed"', "signal: killed",
                 "out of memory", "cudamalloc", "failed to allocate"
             ))
+            status.update(label="Analiza nie powiodła się", state="error")
             if is_oom:
                 st.error(
                     "❌ Serwer Ollama został zabity (prawdopodobnie brak pamięci — OOM).\n\n"
@@ -352,6 +384,8 @@ if submitted and st.session_state.zip_data["is_valid"]:
             else:
                 st.error(f"❌ Analiza nie powiodła się: {e}")
             st.stop()
+
+        status.update(label="Analiza zakończona sukcesem!", state="complete")
 
     st.success("Analiza zakończona sukcesem!")
 

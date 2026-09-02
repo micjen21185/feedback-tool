@@ -119,17 +119,35 @@ Wygeneruj raport używając tagów.
             retry_on_timeout=False,  # a too-slow reduce won't get faster on retry
         )
 
-        return HegemonOutput(
-            analysis=DeepAnalysis(
-                factual_summary=self._extract_tag(raw_response, "factual_summary"),
-                linguistic_summary=self._extract_tag(raw_response, "linguistic_summary"),
-                missed_context=self._extract_list(raw_response, "missed_context")
-            ),
-            feedback=ConstructiveFeedback(
-                executive_summary_markdown=self._extract_tag(raw_response, "executive_summary"),
-                strengths=self._extract_list(raw_response, "strengths"),
-                areas_for_improvement=self._extract_list(raw_response, "areas_for_improvement"),
-                actionable_tips=self._extract_list(raw_response, "actionable_tips"),
-                overall_message=self._extract_tag(raw_response, "overall_message")
+        analysis = DeepAnalysis(
+            factual_summary=self._extract_tag(raw_response, "factual_summary"),
+            linguistic_summary=self._extract_tag(raw_response, "linguistic_summary"),
+            missed_context=self._extract_list(raw_response, "missed_context")
+        )
+        feedback = ConstructiveFeedback(
+            executive_summary_markdown=self._extract_tag(raw_response, "executive_summary"),
+            strengths=self._extract_list(raw_response, "strengths"),
+            areas_for_improvement=self._extract_list(raw_response, "areas_for_improvement"),
+            actionable_tips=self._extract_list(raw_response, "actionable_tips"),
+            overall_message=self._extract_tag(raw_response, "overall_message")
+        )
+
+        # Fallback: the model wrote something but used none of the expected tags. Rather than
+        # show a blank report, surface the raw text as the essay so the run isn't wasted.
+        nothing_parsed = not any([
+            analysis.factual_summary, analysis.linguistic_summary,
+            feedback.executive_summary_markdown, feedback.strengths,
+            feedback.areas_for_improvement, feedback.actionable_tips
+        ])
+        if nothing_parsed and raw_response.strip():
+            feedback.executive_summary_markdown = (
+                    "> ⚠️ Model nie użył wymaganych znaczników — poniżej surowa odpowiedź.\n\n"
+                    + raw_response.strip()
             )
+
+        return HegemonOutput(
+            analysis=analysis,
+            feedback=feedback,
+            raw_reducer_response=raw_response,
+            reducer_input=user_prompt
         )

@@ -162,6 +162,11 @@ class HegemonOutput(BaseModel):
         default_factory=list,
         description="Znaczniki czasu (start_time) fragmentów, które miały ustalenia w fazie map (tylko swarm)."
     )
+    # Debug/observability: the raw text the reducer/monolith produced, and the aggregated
+    # input that was fed into the reducer. Surfaced in the UI so a failed tag-extraction or
+    # a weak reduce can be inspected instead of showing a blank report.
+    raw_reducer_response: str = Field(default="", description="Surowa odpowiedź modelu reduktora/monolitu.")
+    reducer_input: str = Field(default="", description="Zagregowane dane wejściowe podane do reduktora.")
 
 
 class FinalReport(BaseModel):
@@ -170,6 +175,8 @@ class FinalReport(BaseModel):
     telemetry: TelemetryReport
     scorecard: Optional[ScoreCard] = None
     map_timestamps: List[float] = Field(default_factory=list)
+    raw_reducer_response: str = Field(default="", description="Surowa odpowiedź modelu reduktora/monolitu.")
+    reducer_input: str = Field(default="", description="Zagregowane dane wejściowe podane do reduktora.")
 
 
 class ChunkMeta(BaseModel):

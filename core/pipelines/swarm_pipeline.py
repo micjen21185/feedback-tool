@@ -10,31 +10,35 @@ logger = logging.getLogger(__name__)
 
 
 class SwarmNaivePipeline:
-    def __init__(self, linguistic_agent, factual_agent, combine_engine, hegemon, config, use_tools: bool = False):
+    def __init__(self, linguistic_agent, factual_agent, combine_engine, hegemon, config, use_tools: bool = False,
+                 progress_cb=None):
         self.linguistic_agent = linguistic_agent
         self.factual_agent = factual_agent
         self.combine_engine = combine_engine
         self.hegemon = hegemon
         self.config = config
         self.use_tools = use_tools
+        self._progress = progress_cb or (lambda _msg: None)
 
     async def execute(self, metadata: LectureMetadata, chunks: List[ChunkPayload],
                       presentation_context: str = "", slide_coverage: list = None) -> HegemonOutput:
         batch_size = 4
         batches = [chunks[i:i + batch_size] for i in range(0, len(chunks), batch_size)]
+        self._progress(f"🧠 Faza MAP: {len(chunks)} chunków w {len(batches)} batchach (po {batch_size}).")
 
         # Batches run sequentially so trailing state flows ACROSS batch boundaries too
         # (in-batch chunks still run concurrently inside _process_batch — map-reduce preserved).
         mapped_results = []
         carry_ling = None
         carry_fact = None
-        for batch in batches:
+        for bi, batch in enumerate(batches, start=1):
             if batch:
                 if carry_ling is not None:
                     batch[0].trailing_linguistics = carry_ling
                 if carry_fact is not None:
                     batch[0].trailing_fact_summary = carry_fact
 
+            self._progress(f"   ⏳ MAP batch {bi}/{len(batches)} (agent merytoryczny + językowy równolegle)…")
             batch_out = await self._process_batch(batch, metadata)
             mapped_results.extend(batch_out)
 
@@ -46,9 +50,15 @@ class SwarmNaivePipeline:
         ling_results = [r[0] for r in mapped_results if r[0] is not None]
         fact_results = [r[1] for r in mapped_results if r[1] is not None]
 
+        self._progress("🔗 Faza COMBINE: agregacja i redukcja ustaleń z chunków (deterministyczna)…")
         thematic_blocks, behavioral_profiles = await self.combine_engine.aggregate_dual_track(mapped_results, metadata)
         scorecard = self.combine_engine.compute_scorecard(ling_results, fact_results, slide_coverage)
+        self._progress(
+            f"   ✅ Zredukowano do {len(thematic_blocks)} bloków merytorycznych "
+            f"i {len(behavioral_profiles)} profili behawioralnych. Ocena: {scorecard.overall_score}/100."
+        )
 
+        self._progress("🏛️ Faza REDUCE: Hegemon generuje raport końcowy…")
         try:
             report = await self.hegemon.generate_report(
                 metadata=metadata,
@@ -57,11 +67,13 @@ class SwarmNaivePipeline:
                 presentation_context=presentation_context,
                 scorecard=scorecard
             )
+            self._progress("   ✅ Hegemon zakończył raport.")
         except Exception as e:
             # The reduce call failed (e.g. timeout on a 40+ min talk). Do NOT lose the whole
             # run: the scorecard is deterministic and the map findings are already aggregated,
             # so return a degraded-but-valid report built from what we have.
             logger.error("Hegemon reduce failed (%s). Returning degraded report from map findings.", e)
+            self._progress(f"   ⚠️ Hegemon zawiódł ({e}). Zwracam raport awaryjny z ustaleń fazy map.")
             report = self._build_fallback_report(thematic_blocks, behavioral_profiles)
         report.scorecard = scorecard
 

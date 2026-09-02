@@ -84,19 +84,34 @@ Nie używaj JSON! Przy każdej konkretnej obserwacji podawaj znacznik czasu [MM:
             retry_on_timeout=False
         )
 
+        analysis = DeepAnalysis(
+            factual_summary=self._extract_tag(raw_response, "factual_summary"),
+            linguistic_summary=self._extract_tag(raw_response, "linguistic_summary")
+        )
+        feedback = ConstructiveFeedback(
+            executive_summary_markdown=self._extract_tag(raw_response, "executive_summary"),
+            strengths=self._extract_list(raw_response, "strengths"),
+            areas_for_improvement=self._extract_list(raw_response, "areas_for_improvement"),
+            actionable_tips=self._extract_list(raw_response, "actionable_tips"),
+            overall_message=self._extract_tag(raw_response, "overall_message")
+        )
+        nothing_parsed = not any([
+            analysis.factual_summary, analysis.linguistic_summary,
+            feedback.executive_summary_markdown, feedback.strengths,
+            feedback.areas_for_improvement, feedback.actionable_tips
+        ])
+        if nothing_parsed and raw_response.strip():
+            feedback.executive_summary_markdown = (
+                    "> ⚠️ Model nie użył wymaganych znaczników — poniżej surowa odpowiedź.\n\n"
+                    + raw_response.strip()
+            )
+
         return HegemonOutput(
-            analysis=DeepAnalysis(
-                factual_summary=self._extract_tag(raw_response, "factual_summary"),
-                linguistic_summary=self._extract_tag(raw_response, "linguistic_summary")
-            ),
-            feedback=ConstructiveFeedback(
-                executive_summary_markdown=self._extract_tag(raw_response, "executive_summary"),
-                strengths=self._extract_list(raw_response, "strengths"),
-                areas_for_improvement=self._extract_list(raw_response, "areas_for_improvement"),
-                actionable_tips=self._extract_list(raw_response, "actionable_tips"),
-                overall_message=self._extract_tag(raw_response, "overall_message")
-            ),
-            scorecard=self._parse_scorecard(raw_response)
+            analysis=analysis,
+            feedback=feedback,
+            scorecard=self._parse_scorecard(raw_response),
+            raw_reducer_response=raw_response,
+            reducer_input=prompt
         )
 
     def _parse_scorecard(self, text: str):
@@ -207,8 +222,24 @@ Oceń wystąpienie w 5 wymiarach, każdy 0-100, wraz z jednym zdaniem uzasadnien
             overall_message=self._extract_tag(raw_feedback, "overall_message")
         )
 
-        return HegemonOutput(analysis=analysis_obj, feedback=feedback_obj,
-                             scorecard=self._parse_scorecard(raw_feedback))
+        nothing_parsed = not any([
+            analysis_obj.factual_summary, analysis_obj.linguistic_summary,
+            feedback_obj.executive_summary_markdown, feedback_obj.strengths,
+            feedback_obj.areas_for_improvement, feedback_obj.actionable_tips
+        ])
+        if nothing_parsed and raw_feedback.strip():
+            feedback_obj.executive_summary_markdown = (
+                    "> ⚠️ Model nie użył wymaganych znaczników — poniżej surowa odpowiedź.\n\n"
+                    + raw_feedback.strip()
+            )
+
+        return HegemonOutput(
+            analysis=analysis_obj,
+            feedback=feedback_obj,
+            scorecard=self._parse_scorecard(raw_feedback),
+            raw_reducer_response=f"--- FAZA 1 (Analiza) ---\n{raw_analysis}\n\n--- FAZA 2 (Feedback) ---\n{raw_feedback}",
+            reducer_input=f"--- PROMPT FAZY 1 ---\n{phase_1_prompt}\n\n--- PROMPT FAZY 2 ---\n{phase_2_prompt}"
+        )
 
     def _parse_score(self, text: str, tag: str) -> float:
         raw = self._extract_tag(text, tag)
