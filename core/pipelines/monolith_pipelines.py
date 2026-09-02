@@ -4,7 +4,7 @@ from typing import Any, List
 from core.config_loader import Config
 from models.schemas import (
     LectureMetadata, DeepAnalysis, ConstructiveFeedback,
-    HegemonOutput, SystemConfiguration, ScoreCard, readiness_verdict
+    HegemonOutput, SystemConfiguration, ScoreCard, readiness_verdict, MultiDimensionScore
 )
 
 
@@ -190,75 +190,56 @@ Braki: {', '.join(analysis_obj.missed_context) if analysis_obj.missed_context el
 
 <INSTRUCTIONS>
 Sformułuj ostateczny feedback dla prelegenta w oparciu o powyższą analizę. Używaj modelu SBI (Sytuacja-Zachowanie-Wpływ).
-Przy każdej konkretnej obserwacji podawaj znacznik czasu [MM:SS] i rozłóż uwagi po całym wystąpieniu (początek, środek, koniec).
-NIE UŻYWAJ JSON. Użyj tagów:
-<executive_summary> (Wieloakapitowy esej mentorski Markdown) </executive_summary>
-<strengths> (lista od myślników) </strengths>
-<areas_for_improvement> (lista od myślników) </areas_for_improvement>
-<actionable_tips> (lista porad od myślników) </actionable_tips>
-<overall_message> (Zdanie motywujące) </overall_message>
-
-<SCORING_RUBRIC>
-Oceń wystąpienie w 5 wymiarach, każdy 0-100, wraz z jednym zdaniem uzasadnienia. Użyj dokładnie tych tagów:
-<score_factual> (0-100) </score_factual> <justify_factual> (uzasadnienie) </justify_factual>
-<score_linguistic> (0-100) </score_linguistic> <justify_linguistic> (uzasadnienie) </justify_linguistic>
-<score_structure> (0-100) </score_structure> <justify_structure> (uzasadnienie) </justify_structure>
-<score_tempo> (0-100) </score_tempo> <justify_tempo> (uzasadnienie) </justify_tempo>
-<score_confidence> (0-100) </score_confidence> <justify_confidence> (uzasadnienie) </justify_confidence>
-</SCORING_RUBRIC>
+W polu executive_summary_markdown napisz wieloakapitowy esej mentorski (Markdown). Przy każdej konkretnej obserwacji
+podawaj znacznik czasu [MM:SS] i rozłóż uwagi po całym wystąpieniu (początek, środek, koniec).
 </INSTRUCTIONS>
 """
-        raw_feedback = await self.gateway.execute_raw(
-            prompt=phase_2_prompt, model=self.config.hegemon_model, agent_role="Hegemon (Scenariusz 2 - Feedback)",
+        # Phase 2 uses execute_structured (JSON schema for commercial models, JSON→XML fallback
+        # for local ones) so a model that ignores raw XML tags still yields a parseable report.
+        feedback_obj: ConstructiveFeedback = await self.gateway.execute_structured(
+            prompt=phase_2_prompt, schema_class=ConstructiveFeedback, model=self.config.hegemon_model,
+            agent_role="Hegemon (Scenariusz 2 - Feedback)",
             max_tokens=Config.HEGEMON_MAX_TOKENS, timeout=Config.HEGEMON_REQUEST_TIMEOUT,
             retry_on_timeout=False
         )
 
-        feedback_obj = ConstructiveFeedback(
-            executive_summary_markdown=self._extract_tag(raw_feedback, "executive_summary"),
-            strengths=self._extract_list(raw_feedback, "strengths"),
-            areas_for_improvement=self._extract_list(raw_feedback, "areas_for_improvement"),
-            actionable_tips=self._extract_list(raw_feedback, "actionable_tips"),
-            overall_message=self._extract_tag(raw_feedback, "overall_message")
+        # Scoring is a separate constrained structured call (5 dimensions), also schema-validated.
+        score_prompt = f"""Na podstawie analizy oceń wystąpienie w 5 wymiarach, każdy 0-100.
+<ANALIZA>
+Merytoryka: {analysis_obj.factual_summary}
+Język i dykcja: {analysis_obj.linguistic_summary}
+</ANALIZA>
+Zwróć liczby 0-100 dla: score_factual, score_linguistic, score_structure, score_tempo, score_confidence."""
+        scores: MultiDimensionScore = await self.gateway.execute_structured(
+            prompt=score_prompt, schema_class=MultiDimensionScore, model=self.config.hegemon_model,
+            agent_role="Hegemon (Scenariusz 2 - Scoring)",
+            max_tokens=512, timeout=Config.HEGEMON_REQUEST_TIMEOUT, retry_on_timeout=False
         )
-
-        nothing_parsed = not any([
-            analysis_obj.factual_summary, analysis_obj.linguistic_summary,
-            feedback_obj.executive_summary_markdown, feedback_obj.strengths,
-            feedback_obj.areas_for_improvement, feedback_obj.actionable_tips
-        ])
-        if nothing_parsed and raw_feedback.strip():
-            feedback_obj.executive_summary_markdown = (
-                    "> ⚠️ Model nie użył wymaganych znaczników — poniżej surowa odpowiedź.\n\n"
-                    + raw_feedback.strip()
-            )
 
         return HegemonOutput(
             analysis=analysis_obj,
             feedback=feedback_obj,
-            scorecard=self._parse_scorecard(raw_feedback),
-            raw_reducer_response=f"--- FAZA 1 (Analiza) ---\n{raw_analysis}\n\n--- FAZA 2 (Feedback) ---\n{raw_feedback}",
+            scorecard=self._scorecard_from_scores(scores),
+            raw_reducer_response=(
+                f"--- FAZA 1 (Analiza) ---\n{raw_analysis}\n\n"
+                f"--- FAZA 2 (Feedback, structured) ---\n{feedback_obj.model_dump_json(indent=2)}\n\n"
+                f"--- SCORING (structured) ---\n{scores.model_dump_json(indent=2)}"
+            ),
             reducer_input=f"--- PROMPT FAZY 1 ---\n{phase_1_prompt}\n\n--- PROMPT FAZY 2 ---\n{phase_2_prompt}"
         )
 
-    def _parse_score(self, text: str, tag: str) -> float:
-        raw = self._extract_tag(text, tag)
-        match = re.search(r"\d{1,3}", raw)
-        return float(min(100, int(match.group(0)))) if match else 100.0
-
-    def _parse_scorecard(self, text: str):
-        factual = self._parse_score(text, "score_factual")
-        linguistic = self._parse_score(text, "score_linguistic")
-        structure = self._parse_score(text, "score_structure")
-        tempo = self._parse_score(text, "score_tempo")
-        confidence = self._parse_score(text, "score_confidence")
+    @staticmethod
+    def _scorecard_from_scores(scores) -> ScoreCard:
         # Weighted overall: factual dominant, matching the swarm's factual-heavy blend.
         overall = round(
-            0.35 * factual + 0.20 * linguistic + 0.20 * structure + 0.15 * tempo + 0.10 * confidence, 1
+            0.35 * scores.score_factual + 0.20 * scores.score_linguistic + 0.20 * scores.score_structure
+            + 0.15 * scores.score_tempo + 0.10 * scores.score_confidence, 1
         )
         return ScoreCard(
-            factual_score=factual,
-            linguistic_score=round((linguistic + structure + tempo + confidence) / 4, 1),
+            factual_score=scores.score_factual,
+            linguistic_score=round(
+                (scores.score_linguistic + scores.score_structure + scores.score_tempo + scores.score_confidence) / 4,
+                1),
             overall_score=overall,
             readiness_verdict=readiness_verdict(overall)
         )

@@ -154,6 +154,16 @@ def readiness_verdict(score: float) -> str:
     return "Niegotowe do publicznego wystąpienia — konieczna gruntowna poprawa"
 
 
+class MultiDimensionScore(BaseModel):
+    """5-dimension scoring used by the two-phase monolith (scenario 2), extracted via
+    execute_structured so it survives models that ignore XML tags."""
+    score_factual: float = Field(default=100.0, ge=0, le=100, description="Ocena merytoryki 0-100.")
+    score_linguistic: float = Field(default=100.0, ge=0, le=100, description="Ocena języka/dykcji 0-100.")
+    score_structure: float = Field(default=100.0, ge=0, le=100, description="Ocena struktury/logiki 0-100.")
+    score_tempo: float = Field(default=100.0, ge=0, le=100, description="Ocena tempa mowy 0-100.")
+    score_confidence: float = Field(default=100.0, ge=0, le=100, description="Ocena pewności/płynności 0-100.")
+
+
 class HegemonOutput(BaseModel):
     analysis: DeepAnalysis
     feedback: ConstructiveFeedback

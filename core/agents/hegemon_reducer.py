@@ -119,6 +119,52 @@ Wygeneruj raport używając tagów.
             retry_on_timeout=False,  # a too-slow reduce won't get faster on retry
         )
 
+        analysis, feedback = self._parse_report(raw_response)
+
+        # Bounded corrective retry: if the model produced text but used NONE of the required
+        # tags, ask once more with a strict corrective instruction. LLMs are stochastic — a
+        # second attempt with an explicit "tags only" nudge usually complies. One retry only,
+        # to avoid doubling cost/latency on the (already heavy) reduce call.
+        if self._nothing_parsed(analysis, feedback) and raw_response.strip():
+            corrective = (
+                f"{system_prompt}\n{user_prompt}\n\n"
+                "<KOREKTA FORMATU>\n"
+                "Twoja poprzednia odpowiedź NIE zawierała wymaganych znaczników XML i nie dało się jej "
+                "sparsować. Odpowiedz PONOWNIE, używając WYŁĄCZNIE wymaganych tagów "
+                "(<factual_summary>…</factual_summary>, <executive_summary>…</executive_summary> itd.). "
+                "Nie dodawaj żadnego tekstu przed pierwszym tagiem ani po ostatnim. NIE opisuj swojego "
+                "rozumowania poza tagami."
+            )
+            retry_response = await self.gateway.execute_raw(
+                prompt=corrective,
+                model=self.model,
+                agent_role="Hegemon (Reduce Phase - Retry)",
+                max_tokens=Config.HEGEMON_MAX_TOKENS,
+                temperature=0.1,  # lower temp = more literal instruction-following
+                timeout=Config.HEGEMON_REQUEST_TIMEOUT,
+                retry_on_timeout=False,
+            )
+            retry_analysis, retry_feedback = self._parse_report(retry_response)
+            if not self._nothing_parsed(retry_analysis, retry_feedback):
+                analysis, feedback = retry_analysis, retry_feedback
+                raw_response = retry_response
+
+        # Last-resort fallback: still no tags after the retry. Surface the raw text as the essay
+        # so the run isn't wasted (visible in the report + Debug tab).
+        if self._nothing_parsed(analysis, feedback) and raw_response.strip():
+            feedback.executive_summary_markdown = (
+                    "> ⚠️ Model nie użył wymaganych znaczników (nawet po korekcie) — poniżej surowa odpowiedź.\n\n"
+                    + raw_response.strip()
+            )
+
+        return HegemonOutput(
+            analysis=analysis,
+            feedback=feedback,
+            raw_reducer_response=raw_response,
+            reducer_input=user_prompt
+        )
+
+    def _parse_report(self, raw_response: str):
         analysis = DeepAnalysis(
             factual_summary=self._extract_tag(raw_response, "factual_summary"),
             linguistic_summary=self._extract_tag(raw_response, "linguistic_summary"),
@@ -131,23 +177,12 @@ Wygeneruj raport używając tagów.
             actionable_tips=self._extract_list(raw_response, "actionable_tips"),
             overall_message=self._extract_tag(raw_response, "overall_message")
         )
+        return analysis, feedback
 
-        # Fallback: the model wrote something but used none of the expected tags. Rather than
-        # show a blank report, surface the raw text as the essay so the run isn't wasted.
-        nothing_parsed = not any([
+    @staticmethod
+    def _nothing_parsed(analysis: DeepAnalysis, feedback: ConstructiveFeedback) -> bool:
+        return not any([
             analysis.factual_summary, analysis.linguistic_summary,
             feedback.executive_summary_markdown, feedback.strengths,
             feedback.areas_for_improvement, feedback.actionable_tips
         ])
-        if nothing_parsed and raw_response.strip():
-            feedback.executive_summary_markdown = (
-                    "> ⚠️ Model nie użył wymaganych znaczników — poniżej surowa odpowiedź.\n\n"
-                    + raw_response.strip()
-            )
-
-        return HegemonOutput(
-            analysis=analysis,
-            feedback=feedback,
-            raw_reducer_response=raw_response,
-            reducer_input=user_prompt
-        )
