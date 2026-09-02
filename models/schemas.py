@@ -398,3 +398,43 @@ class EvaluationReport(BaseModel):
     judge_tokens_in: int = 0
     judge_tokens_out: int = 0
     summary: str = ""
+
+
+class RunModels(BaseModel):
+    hegemon_model: str = ""
+    factual_model: str = ""
+    linguistic_model: str = ""
+    utility_model: str = ""
+
+
+class RunResult(BaseModel):
+    """One complete pipeline execution — the unit of storage/comparison/export. Keyed by a
+    composite identity so the SAME scenario run with DIFFERENT models is stored separately."""
+    run_id: str = Field(description="Unikalny identyfikator uruchomienia.")
+    created_at: str = Field(description="Znacznik czasu utworzenia (ISO).")
+    scenario_name: str
+    models: RunModels
+    use_tools: bool = False
+    use_llmlingua: bool = False
+    # Input identity + human-readable file metadata for the export/comparison header.
+    input_fingerprint: str = ""
+    source_label: str = Field(default="", description="Nazwa/etykieta pliku wejściowego.")
+    duration_sec: float = 0.0
+    total_words: int = 0
+    main_topic: str = ""
+    target_audience: str = ""
+    knowledge_level: str = ""
+    report: FinalReport
+
+    def display_label(self) -> str:
+        # Compact label distinguishing same-scenario/different-model runs in selectors.
+        t = self.created_at[11:16] if len(self.created_at) >= 16 else self.created_at
+        return f"{self.scenario_name} · H={self.models.hegemon_model.split('/')[-1]} · {t}"
+
+
+class BatchExport(BaseModel):
+    """Top-level downloadable artifact: all runs of a batch + the judge comparison over them."""
+    created_at: str
+    source_label: str = ""
+    runs: List[RunResult] = Field(default_factory=list)
+    evaluation: Optional[EvaluationReport] = None

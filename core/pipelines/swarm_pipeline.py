@@ -69,6 +69,11 @@ class SwarmNaivePipeline:
         unverified_claims = self.combine_engine.collect_unverified_claims(fact_results)
 
         self._progress("🏛️ Faza REDUCE: Hegemon generuje raport końcowy…")
+        # Pre-build the aggregated reducer input so it's captured even if the reduce throws.
+        fallback_input = (
+            f"<CHRONOLOGICZNE BLOKI MERYTORYCZNE>\n{chr(10).join(thematic_blocks)}\n\n"
+            f"<CHRONOLOGICZNE PROFILE BEHAWIORALNE>\n{chr(10).join(behavioral_profiles)}"
+        )
         try:
             report = await self.hegemon.generate_report(
                 metadata=metadata,
@@ -80,12 +85,15 @@ class SwarmNaivePipeline:
             )
             self._progress("   ✅ Hegemon zakończył raport.")
         except Exception as e:
-            # The reduce call failed (e.g. timeout on a 40+ min talk). Do NOT lose the whole
-            # run: the scorecard is deterministic and the map findings are already aggregated,
-            # so return a degraded-but-valid report built from what we have.
-            logger.error("Hegemon reduce failed (%s). Returning degraded report from map findings.", e)
-            self._progress(f"   ⚠️ Hegemon zawiódł ({e}). Zwracam raport awaryjny z ustaleń fazy map.")
-            report = self._build_fallback_report(thematic_blocks, behavioral_profiles)
+            # The reduce call failed. Do NOT lose the whole run: the scorecard is deterministic
+            # and the map findings are aggregated, so return a degraded-but-valid report that
+            # ALSO records the aggregated input + the error, so the Debug tab shows the cause.
+            logger.error("Hegemon reduce failed (%r). Returning degraded report from map findings.", e)
+            self._progress(f"   ⚠️ Hegemon zawiódł ({type(e).__name__}: {e}). Zwracam raport awaryjny z fazy map.")
+            report = self._build_fallback_report(
+                thematic_blocks, behavioral_profiles,
+                reducer_input=fallback_input, error=f"{type(e).__name__}: {e}"
+            )
         report.scorecard = scorecard
 
         # Timestamps of chunks that produced ANY finding in the map phase — used by the
@@ -129,14 +137,19 @@ class SwarmNaivePipeline:
         return batch_results
 
     @staticmethod
-    def _build_fallback_report(thematic_blocks: List[str], behavioral_profiles: List[str]) -> HegemonOutput:
+    def _build_fallback_report(thematic_blocks: List[str], behavioral_profiles: List[str],
+                               reducer_input: str = "", error: str = "") -> HegemonOutput:
         # Degraded report used when the Hegemon reduce call fails. Surfaces the raw aggregated
         # map findings so the run is not wasted; the deterministic scorecard is attached by the caller.
+        # Records reducer_input + the actual error so the Debug tab shows WHY it failed (previously
+        # these were empty on the fallback path, hiding the root cause).
         thematic_text = "\n".join(thematic_blocks) if isinstance(thematic_blocks, list) else str(thematic_blocks)
         behavioral_text = "\n".join(behavioral_profiles) if isinstance(behavioral_profiles, list) else str(
             behavioral_profiles)
-        notice = ("⚠️ Faza reduce (Hegemon) nie powiodła się — prawdopodobnie przekroczono limit czasu na długim "
-                  "wystąpieniu. Poniżej surowe, zagregowane ustalenia z fazy map oraz deterministyczna ocena punktowa.")
+        notice = ("⚠️ Faza reduce (Hegemon) nie powiodła się. Poniżej surowe, zagregowane ustalenia z fazy map "
+                  "oraz deterministyczna ocena punktowa.")
+        if error:
+            notice += f"\n\nPowód błędu: {error}"
         return HegemonOutput(
             analysis=DeepAnalysis(
                 factual_summary=f"[Raport awaryjny] {notice}\n\n{thematic_text}",
@@ -153,5 +166,7 @@ class SwarmNaivePipeline:
                 areas_for_improvement=[],
                 actionable_tips=["Uruchom ponownie fazę reduce (mniejszy model Hegemona lub większy limit czasu)."],
                 overall_message=notice
-            )
+            ),
+            raw_reducer_response=f"[REDUCE FAILED] {error}",
+            reducer_input=reducer_input
         )

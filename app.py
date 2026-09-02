@@ -4,14 +4,17 @@ import json
 import pandas as pd
 import streamlit as st
 import zipfile
+from datetime import datetime, timezone
 
+from core.batch_runner import run_batch, scenarios_for_batch
 from core.config_loader import Config
 from core.llm_gateway import LLMGateway, check_ollama_models
 from core.pipelines.evaluation_engine import EvaluationEngine
 from core.pipelines.orchestrator import Orchestrator
 from models.schemas import (
     ExperimentScenario, LectureMetadata, SystemConfiguration,
-    AgentModelsConfig, ChunkPayload, SlideSummary, TimelinePayload
+    AgentModelsConfig, ChunkPayload, SlideSummary, TimelinePayload,
+    BatchExport
 )
 from observabilty.metrics_engine import ObservabilityManager
 
@@ -35,6 +38,11 @@ if 'evaluated_reports' not in st.session_state:
 # Which cached scenario's report to show by default in the persistent report view.
 if 'active_report_scenario' not in st.session_state:
     st.session_state.active_report_scenario = None
+
+# Multi-run store (composite-keyed): every RunResult, so the SAME scenario with DIFFERENT models
+# is kept separately for comparison/export. Separate from the single-run 'evaluated_reports' view.
+if 'runs' not in st.session_state:
+    st.session_state.runs = []
 
 
 def process_uploaded_zip(uploaded_file):
@@ -88,6 +96,75 @@ def process_uploaded_zip(uploaded_file):
     except Exception as e:
         st.error(f"❌ Błąd przetwarzania paczki ZIP: {e}")
         return False
+
+
+def _judge_config_controls(key_prefix: str) -> dict:
+    """Render judge-grounding controls in an expander; return kwargs for EvaluationEngine.
+    Shared by the batch section and the manual comparison section."""
+    with st.expander("⚙️ Konfiguracja sędziego (osadzenie / groundedness)"):
+        excerpt_chars = st.slider(
+            "Rozmiar fragmentu transkrypcji dla sędziego (znaki)", 0, 30000,
+            Config.JUDGE_EXCERPT_CHARS, step=1000, key=f"{key_prefix}_excerpt_chars",
+            help="0 = wyłącz wieloregionowy fragment. Więcej = lepsze osadzenie, ale drożej."
+        )
+        excerpt_regions = st.slider(
+            "Liczba regionów (początek/środek/koniec…)", 1, 5, Config.JUDGE_EXCERPT_REGIONS,
+            key=f"{key_prefix}_excerpt_regions"
+        )
+        probe_timestamps = st.slider(
+            "Liczba sond czasowych [MM:SS] do sprawdzenia", 0, 20, Config.JUDGE_PROBE_TIMESTAMPS,
+            key=f"{key_prefix}_probe_ts",
+            help="0 = wyłącz sondowanie przy znacznikach czasu."
+        )
+        probe_window = st.slider(
+            "Okno sondy czasowej (znaki wokół znacznika)", 100, 2000, Config.JUDGE_PROBE_WINDOW_CHARS,
+            step=100, key=f"{key_prefix}_probe_win"
+        )
+        focus = st.text_area(
+            "Szczególny nacisk dla sędziego (opcjonalnie)", value="",
+            key=f"{key_prefix}_focus",
+            help="Np. 'Zwróć szczególną uwagę na poprawność nazwisk i dat' albo 'Oceń surowo ton'."
+        )
+    return {
+        "excerpt_chars": excerpt_chars,
+        "excerpt_regions": excerpt_regions,
+        "probe_timestamps": probe_timestamps,
+        "probe_window_chars": probe_window,
+        "focus_instruction": focus,
+    }
+
+
+def _batch_markdown(export) -> str:
+    """Human-readable Markdown summary of a batch: header + per-run scores/cost + judge table."""
+    lines = [
+        f"# Raport wsadowy — {export.source_label}",
+        f"Utworzono: {export.created_at}",
+        "",
+        "## Uruchomienia",
+    ]
+    for r in export.runs:
+        sc = r.report.scorecard
+        overall = f"{sc.overall_score}/100" if sc else "—"
+        cost = r.report.telemetry.total_cost_usd
+        toks = r.report.telemetry.total_tokens_in + r.report.telemetry.total_tokens_out
+        lines.append(
+            f"- **{r.scenario_name}** | Hegemon=`{r.models.hegemon_model}`, "
+            f"Merytoryczny=`{r.models.factual_model}`, Językowy=`{r.models.linguistic_model}` | "
+            f"Ocena: {overall} | Koszt: ${cost:.4f} | Tokeny: {toks}"
+        )
+    if export.evaluation and export.evaluation.per_scenario:
+        lines += ["", "## Ocena sędziego (jakość vs. koszt)", "",
+                  "| Scenariusz | Jakość/50 | Osadzenie | Koszt $ | Koszt/pkt | Lost-in-middle |",
+                  "|---|---|---|---|---|---|"]
+        for se in export.evaluation.per_scenario:
+            cpq = round(se.total_cost_usd / se.rubric_total, 6) if se.rubric_total else "—"
+            lines.append(
+                f"| {se.scenario_name} | {se.rubric_total} | {se.rubric.groundedness}/10 | "
+                f"{round(se.total_cost_usd, 5)} | {cpq} | {'TAK' if se.lost_in_middle_flag else 'nie'} |"
+            )
+        if export.evaluation.summary:
+            lines += ["", export.evaluation.summary]
+    return "\n".join(lines)
 
 
 def _fmt_score(value) -> str:
@@ -451,6 +528,100 @@ if st.session_state.evaluated_reports:
     render_report(st.session_state.evaluated_reports[chosen]["report"])
 
 # =========================================================================
+# SEKCJA WSADOWA: uruchom wiele scenariuszy na wybranych modelach, oceń i pobierz raport
+# =========================================================================
+st.divider()
+st.header("🧬 Uruchomienie wsadowe (scenariusze 1–4/5)")
+
+if not st.session_state.zip_data["is_valid"]:
+    st.info("Najpierw wczytaj paczkę ZIP powyżej, aby uruchomić tryb wsadowy.")
+else:
+    _has_presentation = bool(st.session_state.zip_data.get("timeline")) or bool(
+        st.session_state.zip_data.get("slide_summaries"))
+    _default_scenarios = scenarios_for_batch(_has_presentation)
+    st.caption(
+        f"Modele z panelu bocznego: Hegemon=`{hegemon_model}`, Merytoryczny=`{factual_model}`, "
+        f"Językowy=`{linguistic_model}`. Prezentacja wykryta: {'TAK' if _has_presentation else 'nie'}."
+    )
+    chosen_scenarios = st.multiselect(
+        "Scenariusze do uruchomienia (kolejno):",
+        options=[e for e in ExperimentScenario],
+        default=_default_scenarios,
+        format_func=lambda x: f"{x.value} - {x.name}"
+    )
+    auto_judge = st.checkbox("Po uruchomieniu od razu oceń i porównaj (sędzia)", value=True)
+    batch_judge_model = st.selectbox("Model sędziego (dla oceny wsadu):", options=Config.get_all_models(), index=0,
+                                     key="batch_judge_model")
+    batch_judge_cfg = _judge_config_controls("batch")
+    batch_kb_pdf = st.file_uploader("(Opcjonalnie) PDF bazy wiedzy dla scenariuszy RAG (4/5)", type="pdf",
+                                    key="batch_kb")
+
+    if st.button("🚀 Uruchom wybrane scenariusze", disabled=not chosen_scenarios):
+        # Preflight models once for the whole batch.
+        missing = check_ollama_models([hegemon_model, factual_model, linguistic_model, Config.UTILITY_MODEL])
+        if missing:
+            st.error("❌ Brakuje modeli w Ollama: " + ", ".join(f"`{m}`" for m in missing)
+                     + ". Pobierz je lub zmień wybór w panelu bocznym.")
+            st.stop()
+
+        _md = st.session_state.zip_data["metadata"]
+        _fingerprint = hashlib.sha256(st.session_state.zip_data["raw_text"].encode("utf-8")).hexdigest()
+        _kb_bytes = batch_kb_pdf.getvalue() if batch_kb_pdf is not None else None
+
+        with st.status("Tryb wsadowy pracuje…", expanded=True) as bstatus:
+            def _bprogress(m: str):
+                bstatus.write(m)
+
+
+            new_runs = run_batch(
+                scenarios=chosen_scenarios,
+                zip_data=st.session_state.zip_data,
+                speaker_role=speaker_role, target_audience=target_audience,
+                main_topic=main_topic, knowledge_level=knowledge_level,
+                hegemon_model=hegemon_model, factual_model=factual_model, linguistic_model=linguistic_model,
+                use_llmlingua=use_llmlingua_switch,
+                input_fingerprint=_fingerprint,
+                source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
+                knowledge_base_bytes=_kb_bytes,
+                progress_cb=_bprogress,
+            )
+            st.session_state.runs.extend(new_runs)
+
+            batch_eval = None
+            if auto_judge and len(new_runs) >= 1:
+                bstatus.write("🧑‍⚖️ Sędzia ocenia wyniki wsadu…")
+                eval_gateway = LLMGateway(ObservabilityManager())
+                engine = EvaluationEngine(eval_gateway, batch_judge_model, **batch_judge_cfg)
+                reports = {r.display_label(): r.report for r in new_runs}
+                duration = max((r.duration_sec for r in new_runs), default=0.0)
+                excerpt = st.session_state.zip_data.get("raw_text", "")
+                batch_eval = asyncio.run(engine.evaluate(excerpt, reports, duration_sec=duration))
+                eval_gateway.reset_session_telemetry()
+
+            bstatus.update(label=f"Wsad zakończony: {len(new_runs)} scenariuszy.", state="complete")
+
+        # Build downloadable artifact (JSON + Markdown summary).
+        export = BatchExport(
+            created_at=datetime.now(timezone.utc).isoformat(),
+            source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
+            runs=new_runs,
+            evaluation=batch_eval,
+        )
+        st.success(f"✅ Uruchomiono {len(new_runs)} scenariuszy. Pobierz raport poniżej.")
+        st.download_button(
+            "⬇️ Pobierz raport wsadu (JSON)",
+            data=export.model_dump_json(indent=2),
+            file_name=f"batch_{export.created_at[:19].replace(':', '-')}.json",
+            mime="application/json"
+        )
+        st.download_button(
+            "⬇️ Pobierz podsumowanie (Markdown)",
+            data=_batch_markdown(export),
+            file_name=f"batch_{export.created_at[:19].replace(':', '-')}.md",
+            mime="text/markdown"
+        )
+
+# =========================================================================
 # SEKCJA EWALUACJI / PORÓWNANIA SCENARIUSZY (LLM-as-judge + telemetria)
 # =========================================================================
 st.divider()
@@ -463,6 +634,7 @@ else:
     st.caption(f"Zbuforowane raporty: {', '.join(cached.keys())}")
     all_models = Config.get_all_models()
     judge_model = st.selectbox("Model sędziego (Judge):", options=all_models, index=0)
+    manual_judge_cfg = _judge_config_controls("manual")
     selected = st.multiselect(
         "Wybierz scenariusze do porównania (2+ dla preferencji parami):",
         options=list(cached.keys()),
@@ -483,7 +655,7 @@ else:
         with st.spinner("Sędzia ocenia raporty..."):
             eval_obs = ObservabilityManager()
             eval_gateway = LLMGateway(eval_obs)
-            engine = EvaluationEngine(eval_gateway, judge_model)
+            engine = EvaluationEngine(eval_gateway, judge_model, **manual_judge_cfg)
             eval_report = asyncio.run(engine.evaluate(excerpt, reports, duration_sec=duration))
 
         st.subheader("📊 Jakość vs. koszt")

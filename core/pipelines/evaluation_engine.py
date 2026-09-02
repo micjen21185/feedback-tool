@@ -19,9 +19,19 @@ class EvaluationEngine:
     (chars/token) per scenario — useful for comparing Polish vs. English small models.
     """
 
-    def __init__(self, gateway, judge_model: str):
+    def __init__(self, gateway, judge_model: str,
+                 excerpt_chars: int = None, excerpt_regions: int = None,
+                 probe_timestamps: int = None, probe_window_chars: int = None,
+                 focus_instruction: str = ""):
         self.gateway = gateway
         self.judge_model = judge_model
+        # Per-run judge configuration (overrides Config defaults when provided). Lets the UI
+        # tune grounding depth and add a free-text focus instruction ("watch names/dates").
+        self.excerpt_chars = Config.JUDGE_EXCERPT_CHARS if excerpt_chars is None else excerpt_chars
+        self.excerpt_regions = Config.JUDGE_EXCERPT_REGIONS if excerpt_regions is None else excerpt_regions
+        self.probe_timestamps = Config.JUDGE_PROBE_TIMESTAMPS if probe_timestamps is None else probe_timestamps
+        self.probe_window_chars = Config.JUDGE_PROBE_WINDOW_CHARS if probe_window_chars is None else probe_window_chars
+        self.focus_instruction = (focus_instruction or "").strip()
 
     @staticmethod
     def _report_text(report: FinalReport) -> str:
@@ -219,12 +229,16 @@ class EvaluationEngine:
             f"\n<SONDY CZASOWE — transkrypcja przy znacznikach [MM:SS] cytowanych w raporcie>\n{probes}\n"
             if probes else ""
         )
+        focus_block = (
+            f"\n<SZCZEGÓLNY NACISK OD UŻYTKOWNIKA>\n{self.focus_instruction}\n"
+            if self.focus_instruction else ""
+        )
         prompt = f"""Jesteś surowym sędzią jakości feedbacku mentorskiego dla wystąpień publicznych.
 Oceniasz JAKOŚĆ poniższego raportu (nie samo wystąpienie).
 
 <FRAGMENT TRANSKRYPCJI — wiele regionów: początek/środek/koniec>
 {transcript_excerpt}
-{ground_block}{probe_block}
+{ground_block}{probe_block}{focus_block}
 <RAPORT DO OCENY (scenariusz: {scenario_name})>
 {self._report_text(report)}
 
@@ -278,7 +292,7 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
         # Idea 1: build a deterministic multi-region excerpt so the judge sees start/middle/end,
         # not just the opening. `transcript_excerpt` may be the full transcript or a pre-sliced
         # string — build_grounding_excerpt is idempotent-safe (returns as-is if short enough).
-        grounded_excerpt = self.build_grounding_excerpt(transcript_excerpt)
+        grounded_excerpt = self.build_grounding_excerpt(transcript_excerpt, self.excerpt_chars, self.excerpt_regions)
 
         # --- Tier 1: absolute rubric per scenario ---
         for name, report in reports.items():
@@ -286,7 +300,8 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
             try:
                 # Idea 3: probe transcript windows at the timestamps THIS report cites, so the
                 # judge can verify each timestamped claim against the source at that point.
-                probes = self.build_timestamp_probes(report, transcript_excerpt, duration_sec)
+                probes = self.build_timestamp_probes(report, transcript_excerpt, duration_sec,
+                                                     self.probe_timestamps, self.probe_window_chars)
                 rubric = await self._judge_absolute(grounded_excerpt, name, report, probes=probes)
             except Exception as e:
                 rubric = JudgeRubric(justification=f"[Sędzia zawiódł: {e}]")
