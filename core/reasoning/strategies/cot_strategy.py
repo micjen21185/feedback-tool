@@ -1,5 +1,6 @@
 from typing import Dict, Any
 
+from core.config_loader import Config
 from core.reasoning.strategies.base_strategy import BaseReasoningStrategy
 from core.reasoning.transient_schemas import CoTTransientOutput
 from models.schemas import ChunkPayload, FactualOutput
@@ -43,7 +44,8 @@ class CoTStrategy(BaseReasoningStrategy):
             prompt=extraction_prompt,
             schema_class=CoTTransientOutput,
             model=model,
-            agent_role="Factual Agent (CoT - Extraction Phase)"
+            agent_role="Factual Agent (CoT - Extraction Phase)",
+            max_tokens=Config.MAP_MAX_TOKENS
         )
 
         return FactualOutput(

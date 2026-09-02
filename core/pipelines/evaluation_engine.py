@@ -81,6 +81,11 @@ class EvaluationEngine:
         # The report's own analysis is the closest available signal to "what the pipeline flagged".
         if report.analysis.missed_context:
             lines.append("POMINIĘTE WĄTKI (wg pipeline): " + "; ".join(report.analysis.missed_context[:max_items]))
+        if report.analysis.unverified_claims:
+            lines.append(
+                "NIEPOTWIERDZONE (do weryfikacji, NIE błędy): "
+                + "; ".join(report.analysis.unverified_claims[:max_items])
+            )
         return "\n".join(lines) if lines else ""
 
     @staticmethod

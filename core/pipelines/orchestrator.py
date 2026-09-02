@@ -91,7 +91,9 @@ class Orchestrator:
             scorecard=hegemon_out.scorecard,
             map_timestamps=hegemon_out.map_timestamps,
             raw_reducer_response=hegemon_out.raw_reducer_response,
-            reducer_input=hegemon_out.reducer_input
+            reducer_input=hegemon_out.reducer_input,
+            substantive_windows=hegemon_out.substantive_windows,
+            total_windows=hegemon_out.total_windows
         )
 
     async def _execute_scenario_1_monolith_naked(self, metadata, raw_text) -> HegemonOutput:

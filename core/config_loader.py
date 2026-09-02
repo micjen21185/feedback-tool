@@ -41,6 +41,11 @@ class Config:
     # header, so the gateway clamps that model back to 4096 automatically.
     HEGEMON_MAX_TOKENS = int(os.getenv("HEGEMON_MAX_TOKENS", "8192"))
 
+    # Output cap for per-chunk MAP agents (factual/linguistic). Their output is a small structured
+    # object (a few anomalies + short summary), so bound it — across ~60 map calls an unbounded
+    # response is wasted tokens and latency. ~1024 is plenty for the schema they return.
+    MAP_MAX_TOKENS = int(os.getenv("MAP_MAX_TOKENS", "1024"))
+
     # Directory for map-phase checkpoints so a crashed long run can resume mid-way.
     CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", os.getenv("LLM_BENCHMARK_DB", "llm_benchmark.db"))
 

@@ -58,6 +58,10 @@ class SwarmNaivePipeline:
             f"i {len(behavioral_profiles)} profili behawioralnych. Ocena: {scorecard.overall_score}/100."
         )
 
+        # Claims not confirmed against any trusted source (RAG/slides) — computed deterministically
+        # from the map's verification_status. Passed to the reducer AND kept as the authoritative list.
+        unverified_claims = self.combine_engine.collect_unverified_claims(fact_results)
+
         self._progress("🏛️ Faza REDUCE: Hegemon generuje raport końcowy…")
         try:
             report = await self.hegemon.generate_report(
@@ -65,7 +69,8 @@ class SwarmNaivePipeline:
                 thematic_blocks=thematic_blocks,
                 behavioral_profiles=behavioral_profiles,
                 presentation_context=presentation_context,
-                scorecard=scorecard
+                scorecard=scorecard,
+                unverified_claims=unverified_claims
             )
             self._progress("   ✅ Hegemon zakończył raport.")
         except Exception as e:
@@ -86,7 +91,15 @@ class SwarmNaivePipeline:
         for r in fact_results:
             if r.error_texts():
                 map_ts.add(round(r.start_time, 1))
+        # Authoritative (deterministic) unverified list — overrides whatever the essay re-mentioned.
+        report.analysis.unverified_claims = unverified_claims
+
         report.map_timestamps = sorted(map_ts)
+
+        # Non-penalizing substance density: how many map windows carried substantive factual
+        # content (a non-empty thematic summary). Observability only — does NOT affect the score.
+        report.total_windows = len(fact_results)
+        report.substantive_windows = sum(1 for r in fact_results if (r.thematic_summary or "").strip())
         return report
 
     async def _process_batch(self, batch: List[ChunkPayload], metadata: LectureMetadata) -> List[Tuple[Any, Any]]:

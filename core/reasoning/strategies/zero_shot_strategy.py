@@ -1,5 +1,6 @@
 from typing import Dict, Any
 
+from core.config_loader import Config
 from core.reasoning.strategies.base_strategy import BaseReasoningStrategy
 from models.schemas import ChunkPayload, FactualOutput
 
@@ -24,7 +25,8 @@ Przeanalizuj powyższą wypowiedź. Jeśli znajdziesz błędy merytoryczne (nieb
             prompt=prompt,
             schema_class=FactualOutput,
             model=model,
-            agent_role="Factual Agent (Zero-Shot)"
+            agent_role="Factual Agent (Zero-Shot)",
+            max_tokens=Config.MAP_MAX_TOKENS
         )
 
         output.chunk_id = f"chunk_{chunk.chunk_meta.index}"

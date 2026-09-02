@@ -94,6 +94,23 @@ class CombineEngine:
     def _sev_value(item) -> str:
         return item.severity.value if hasattr(item.severity, "value") else str(item.severity)
 
+    @staticmethod
+    def _verif_value(item) -> str:
+        v = getattr(item, "verification_status", None)
+        if v is None:
+            return "NOT_APPLICABLE"
+        return v.value if hasattr(v, "value") else str(v)
+
+    def collect_unverified_claims(self, fact_results: List[FactualOutput]) -> List[str]:
+        """Gather claims the model marked UNVERIFIED (checkable but not in any trusted source).
+        These are surfaced to the speaker/judge as 'needs attention', NOT as errors."""
+        out = []
+        for f_out in sorted(fact_results, key=lambda x: x.start_time):
+            for it in f_out.scored_errors:
+                if self._verif_value(it) == "UNVERIFIED":
+                    out.append(f"[{f_out.start_time}s] {it.text}")
+        return out
+
     def compute_scorecard(
             self,
             ling_results: List[LinguisticOutput],
@@ -113,8 +130,23 @@ class CombineEngine:
                 return sum(_SEVERITY_WEIGHT.get(self._sev_value(it), 3) for it in items_scored)
             return len(items_plain) * _SEVERITY_WEIGHT["MEDIUM"]
 
+        # Factual penalty EXCLUDES non-error statuses: UNVERIFIED (needs review, not proven wrong)
+        # and SUPPORTED_BY_SOURCE (matches trusted source) must NOT lower the score. Only genuine
+        # errors (CONTRADICTS_SOURCE, or plain flagged errors with no status) count.
+        def _fact_penalty(f_out) -> int:
+            penalizable = [
+                it for it in f_out.scored_errors
+                if self._verif_value(it) not in ("UNVERIFIED", "SUPPORTED_BY_SOURCE")
+            ]
+            if penalizable:
+                return sum(_SEVERITY_WEIGHT.get(self._sev_value(it), 3) for it in penalizable)
+            # No scored items at all → fall back to plain error list at MEDIUM.
+            if not f_out.scored_errors:
+                return len(f_out.error_texts()) * _SEVERITY_WEIGHT["MEDIUM"]
+            return 0
+
         ling_penalty = sum(_track_penalty(l.scored_anomalies, l.anomaly_texts()) for l in ling_results)
-        fact_penalty = sum(_track_penalty(f.scored_errors, f.error_texts()) for f in fact_results)
+        fact_penalty = sum(_fact_penalty(f) for f in fact_results)
 
         # Normalize: each window can absorb ~one HIGH (7 pts) before the score drops materially.
         ling_score = max(0.0, 100.0 - (ling_penalty / n_windows) * (100.0 / 21.0))

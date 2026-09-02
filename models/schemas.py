@@ -10,11 +10,24 @@ class AnomalySeverity(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class VerificationStatus(str, Enum):
+    """Trust provenance for a factual claim, based on the source-trust hierarchy:
+    RAG (PDF) + slide summaries are treated as ground truth we believe."""
+    SUPPORTED_BY_SOURCE = "SUPPORTED_BY_SOURCE"  # matches RAG/slides → trusted, NOT an error
+    CONTRADICTS_SOURCE = "CONTRADICTS_SOURCE"  # RAG/slides say otherwise → high-confidence error
+    UNVERIFIED = "UNVERIFIED"  # checkable but not in any source → needs review
+    NOT_APPLICABLE = "NOT_APPLICABLE"  # opinion/narration/trivial → not a factual claim
+
+
 class SeverityItem(BaseModel):
     text: str = Field(description="Opis obserwacji (anomalii lub błędu).")
     severity: AnomalySeverity = Field(
         default=AnomalySeverity.MEDIUM,
         description="Waga obserwacji: LOW (drobiazg), MEDIUM (warte uwagi), HIGH (poważny problem), CRITICAL (rażący błąd, np. wulgaryzm, utrata wątku)."
+    )
+    verification_status: VerificationStatus = Field(
+        default=VerificationStatus.NOT_APPLICABLE,
+        description="Skąd wiadomo o tym fakcie: SUPPORTED_BY_SOURCE (zgodny z RAG/slajdami), CONTRADICTS_SOURCE (sprzeczny ze źródłem), UNVERIFIED (niepotwierdzony — wymaga uwagi), NOT_APPLICABLE (nie jest twardym faktem)."
     )
 
 
@@ -91,6 +104,12 @@ class DeepAnalysis(BaseModel):
     factual_summary: str
     linguistic_summary: str
     missed_context: List[str] = Field(default_factory=list)
+    # Claims the pipeline could NOT confirm against any trusted source (RAG/slides) and that need
+    # human/judge attention before being trusted. NOT the same as "wrong" — just "unconfirmed".
+    unverified_claims: List[str] = Field(
+        default_factory=list,
+        description="Twierdzenia niepotwierdzone przez źródła (RAG/slajdy) — wymagają uwagi prelegenta/sędziego."
+    )
     slide_coverage: List[SlideCoverage] = Field(
         default_factory=list,
         description="Analiza pokrycia slajdów (tylko scenariusz prezentacyjny)."
@@ -177,6 +196,11 @@ class HegemonOutput(BaseModel):
     # a weak reduce can be inspected instead of showing a blank report.
     raw_reducer_response: str = Field(default="", description="Surowa odpowiedź modelu reduktora/monolitu.")
     reducer_input: str = Field(default="", description="Zagregowane dane wejściowe podane do reduktora.")
+    # Non-penalizing observability (Q2): how many map windows carried substantive/checkable content
+    # (a non-empty thematic summary) vs. total. Lets you SEE factual density without baking a
+    # "not enough facts" penalty into the score (which would wrongly assume all talks must be fact-dense).
+    substantive_windows: int = Field(default=0, description="Liczba okien map z treścią merytoryczną.")
+    total_windows: int = Field(default=0, description="Łączna liczba okien fazy map.")
 
 
 class FinalReport(BaseModel):
@@ -187,6 +211,8 @@ class FinalReport(BaseModel):
     map_timestamps: List[float] = Field(default_factory=list)
     raw_reducer_response: str = Field(default="", description="Surowa odpowiedź modelu reduktora/monolitu.")
     reducer_input: str = Field(default="", description="Zagregowane dane wejściowe podane do reduktora.")
+    substantive_windows: int = Field(default=0)
+    total_windows: int = Field(default=0)
 
 
 class ChunkMeta(BaseModel):

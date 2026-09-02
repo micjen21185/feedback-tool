@@ -73,7 +73,7 @@ Wymagane tagi:
 
     async def generate_report(self, metadata: LectureMetadata, thematic_blocks: List[str],
                               behavioral_profiles: List[str], presentation_context: str = "",
-                              scorecard=None) -> HegemonOutput:
+                              scorecard=None, unverified_claims: List[str] = None) -> HegemonOutput:
         system_prompt = self._build_hegemon_prompt(
             role=metadata.speaker_role, audience=metadata.target_audience,
             topic=metadata.main_topic, level=metadata.knowledge_level
@@ -82,6 +82,17 @@ Wymagane tagi:
         presentation_block = ""
         if presentation_context:
             presentation_block = f"\n<POKRYCIE SLAJDÓW I PRZEPŁYW PREZENTACJI>\n{presentation_context}\n"
+
+        # Claims that couldn't be confirmed against any trusted source — the essay must flag these
+        # as "wymaga weryfikacji", NOT as errors (the speaker may be right; we simply can't confirm).
+        unverified_block = ""
+        if unverified_claims:
+            joined = "\n".join(f"- {c}" for c in unverified_claims)
+            unverified_block = (
+                f"\n<TWIERDZENIA NIEPOTWIERDZONE (brak w źródłach — NIE traktuj jako błędy)>\n{joined}\n"
+                "W raporcie zaznacz je jako wymagające weryfikacji przez prelegenta — napisz wprost, że "
+                "nie udało się ich potwierdzić w dostępnych źródłach i prelegent powinien je sprawdzić.\n"
+            )
 
         score_block = ""
         if scorecard is not None:
@@ -106,7 +117,7 @@ Wymagane tagi:
 
 <CHRONOLOGICZNE PROFILE BEHAWIORALNE (Behavioral Profiles)>
 {behavioral_text}
-{presentation_block}{score_block}
+{presentation_block}{unverified_block}{score_block}
 Wygeneruj raport używając tagów.
 """
         raw_response = await self.gateway.execute_raw(

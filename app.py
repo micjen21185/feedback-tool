@@ -118,6 +118,13 @@ def render_report(report):
         if report.analysis.missed_context:
             st.warning(f"**Pominięto wątki:** {', '.join(report.analysis.missed_context)}")
 
+        if report.analysis.unverified_claims:
+            st.warning(
+                "**⚠️ Twierdzenia wymagające weryfikacji** (nie potwierdzone w źródłach — "
+                "NIE oznaczają błędu, ale prelegent/sędzia powinien je sprawdzić):\n\n"
+                + "\n".join(f"- {c}" for c in report.analysis.unverified_claims)
+            )
+
         if report.analysis.presentation_flow is not None:
             flow = report.analysis.presentation_flow
             st.write("### 🖼️ Przepływ Prezentacji")
@@ -163,6 +170,15 @@ def render_report(report):
         m2.metric("Suma Tokenów", f"{report.telemetry.total_tokens_in + report.telemetry.total_tokens_out}")
         m3.metric("Fazy Map", f"{report.telemetry.map_phases_count}")
         m4.metric("Fazy Reduce", f"{report.telemetry.reduce_phases_count}")
+
+        # Non-penalizing substance density (swarm only): how much of the talk carried checkable
+        # factual content. Informational — NOT part of the score.
+        if report.total_windows:
+            pct = round(100 * report.substantive_windows / report.total_windows)
+            st.caption(
+                f"📊 Gęstość merytoryczna (obserwacyjna, nie wpływa na ocenę): "
+                f"{report.substantive_windows}/{report.total_windows} okien z treścią merytoryczną ({pct}%)."
+            )
 
         st.write("---")
         st.write("### 🔍 Szczegóły Rozbicia (Koszt per Agent/Model)")

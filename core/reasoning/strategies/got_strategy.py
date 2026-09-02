@@ -1,8 +1,8 @@
 import asyncio
+from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Tuple
 
-from pydantic import BaseModel, Field
-
+from core.config_loader import Config
 from core.reasoning.strategies.base_strategy import BaseReasoningStrategy
 from models.schemas import ChunkPayload, FactualOutput, SeverityItem
 
@@ -85,7 +85,8 @@ class GoTStrategy(BaseReasoningStrategy):
             prompt=convergence_prompt,
             schema_class=ConvergenceOutput,
             model=model,
-            agent_role="Factual Agent (GoT - Convergence)"
+            agent_role="Factual Agent (GoT - Convergence)",
+            max_tokens=Config.MAP_MAX_TOKENS
         )
 
         return FactualOutput(

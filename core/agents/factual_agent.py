@@ -36,6 +36,18 @@ class FactualAgent:
 4. Nie oceniaj stylu, tempa ani dykcji — to zadanie innego agenta. Zajmujesz się tylko faktami.
 5. Jeśli transkrypcja jest niewyraźna/zniekształcona, załóż życzliwą interpretację i NIE traktuj zniekształcenia transkrypcji jako błędu merytorycznego prelegenta.
 
+<HIERARCHIA ZAUFANIA DO ŹRÓDEŁ — jak weryfikować twierdzenia faktograficzne>
+Traktuj DANE ZEWNĘTRZNE (RAG) oraz treść slajdów (OCR) jako ŹRÓDŁO PRAWDY, któremu ufamy.
+Dla KAŻDEGO twardego twierdzenia faktograficznego prelegenta ustaw pole `verification_status`:
+- SUPPORTED_BY_SOURCE: twierdzenie zgadza się z RAG/slajdami → to NIE jest błąd, NIE zgłaszaj go jako błąd.
+- CONTRADICTS_SOURCE: RAG/slajdy mówią co INNEGO → to PEWNY błąd (wysoka waga: HIGH/CRITICAL).
+- UNVERIFIED: twierdzenie jest sprawdzalne (nazwiska, daty, liczby, kto co wygrał), ale NIE MA go
+  w żadnym źródle → NIE oznaczaj jako błąd i NIE zgaduj czy prawdziwe. Zgłoś je jako niepotwierdzone
+  (LOW/MEDIUM) z adnotacją, że wymaga weryfikacji przez prelegenta/sędziego.
+- NOT_APPLICABLE: opinia, narracja, żart, ogólnik → to nie jest twardy fakt, pomiń.
+ZASADA KLUCZOWA: NIGDY nie orzekaj, że sprawdzalny fakt jest FAŁSZYWY, jeśli nie masz na to źródła.
+Brak potwierdzenia = UNVERIFIED (do sprawdzenia), a NIE = błąd.
+
 ŻELAZNA ZASADA UPROSZCZEŃ (DOPASOWANIE DO WIDOWNI):
 Zanim uznasz fragment za "błąd merytoryczny" (Factual Error), sprawdź poziom wiedzy słuchaczy.
 - Jeśli poziom to "Podstawowy" (Beginner/Junior), prelegent ma pełne prawo do skrótów myślowych, analogii i pomijania skrajnych wyjątków akademickich. Upraszczanie trudnych definicji (np. "Zmienna to takie pudełko na dane") NIE JEST BŁĘDEM, lecz znakomitą praktyką pedagogiczną. Nie umieszczaj takich uproszczeń w tablicy `factual_errors`.

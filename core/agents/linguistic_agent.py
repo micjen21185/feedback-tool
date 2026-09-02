@@ -1,3 +1,4 @@
+from core.config_loader import Config
 from core.llm_gateway import LLMGateway
 from models.schemas import ChunkPayload, LectureMetadata, LinguisticOutput, TrailingLinguisticState
 
@@ -73,14 +74,18 @@ Analiza LLM: Raportuj krytyczny błąd rejestru: "Niedopuszczalny wulgaryzm i sl
                 Wygeneruj odpowiedź rygorystycznie dopasowaną do wymaganego schematu wyjściowego (struktura JSON).
                 - W liście 'anomalies' wymień wszystkie wykryte problemy (krótkie opisy).
                 - W liście 'scored_anomalies' powtórz te same problemy z przypisaną wagą (severity): LOW / MEDIUM / HIGH / CRITICAL. Wulgaryzmy, rażące błędy rejestru lub całkowita utrata wątku = CRITICAL.
+                - OCEŃ TAKŻE KONSTRUKCJĘ ZDAŃ (na podstawie samego tekstu, nie tylko tagów akustycznych):
+                  nadużywanie strony biernej, zdania zbyt długie/zagmatwane, brak wyraźnej puenty,
+                  chaotyczna składnia, urwane myśli. Takie obserwacje też umieść w anomaliach.
                 - W polu 'dominant_tendencies' podsumuj dominujące zjawisko jednym, konkretnym zdaniem.
-                - Opieraj oceny na powyższych danych ilościowych, nie zgaduj.
+                - Opieraj oceny na powyższych danych ilościowych i na tekście, nie zgaduj.
                 """
         output: LinguisticOutput = await self.gateway.execute_structured(
             prompt=f"{system_prompt}\n{user_prompt}",
             schema_class=LinguisticOutput,
             model=self.model,
-            agent_role="Linguistic Agent (Map Phase)"
+            agent_role="Linguistic Agent (Map Phase)",
+            max_tokens=Config.MAP_MAX_TOKENS
         )
 
         output.chunk_id = f"chunk_{chunk.chunk_meta.index}"
