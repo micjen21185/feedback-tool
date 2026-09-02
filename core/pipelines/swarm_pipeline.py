@@ -18,7 +18,13 @@ class SwarmNaivePipeline:
         self.hegemon = hegemon
         self.config = config
         self.use_tools = use_tools
-        self._progress = progress_cb or (lambda _msg: None)
+        self._progress_cb = progress_cb or (lambda _msg: None)
+
+    def _progress(self, msg: str):
+        # Mirror to console log so progress/hangs are visible in the terminal even when
+        # Streamlit's st.status doesn't stream live during the blocking run.
+        logger.info("[swarm] %s", msg)
+        self._progress_cb(msg)
 
     async def execute(self, metadata: LectureMetadata, chunks: List[ChunkPayload],
                       presentation_context: str = "", slide_coverage: list = None) -> HegemonOutput:

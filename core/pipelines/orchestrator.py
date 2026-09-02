@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from typing import List, Dict, Optional
 
@@ -19,6 +20,8 @@ from models.schemas import (
 from tools.gatekeeper import KnowledgeGatekeeper
 from tools.knowledge_engine import KnowledgeEngine
 
+logger = logging.getLogger(__name__)
+
 
 class Orchestrator:
     def __init__(self, config: SystemConfiguration, gateway, progress_cb=None):
@@ -28,6 +31,10 @@ class Orchestrator:
         self._progress = progress_cb or (lambda _msg: None)
 
     def _log(self, msg: str):
+        # Mirror to the console/IDE log too: Streamlit's st.status often won't stream writes
+        # live during a long blocking asyncio.run, so the terminal is where you actually see
+        # progress in real time (and where a hang becomes visible).
+        logger.info("[pipeline] %s", msg)
         self._progress(msg)
 
     def execute_pipeline(

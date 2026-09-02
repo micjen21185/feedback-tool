@@ -36,7 +36,8 @@ class GoTStrategy(BaseReasoningStrategy):
             return await self.gateway.execute_raw(
                 prompt=prompt,
                 model=model,
-                agent_role=f"GoT - Generator {branch_id}"
+                agent_role=f"GoT - Generator {branch_id}",
+                timeout=Config.MAP_REQUEST_TIMEOUT
             )
 
         thoughts = await asyncio.gather(*(generate_thought(i) for i in range(1, 4)))
@@ -51,7 +52,8 @@ class GoTStrategy(BaseReasoningStrategy):
                 prompt=prompt,
                 schema_class=ThoughtScore,
                 model=model,
-                agent_role="GoT - Scorer"
+                agent_role="GoT - Scorer",
+                timeout=Config.MAP_REQUEST_TIMEOUT
             )
             return thought, score
 
@@ -86,7 +88,8 @@ class GoTStrategy(BaseReasoningStrategy):
             schema_class=ConvergenceOutput,
             model=model,
             agent_role="Factual Agent (GoT - Convergence)",
-            max_tokens=Config.MAP_MAX_TOKENS
+            max_tokens=Config.MAP_MAX_TOKENS,
+            timeout=Config.MAP_REQUEST_TIMEOUT
         )
 
         return FactualOutput(

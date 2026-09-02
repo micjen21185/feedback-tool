@@ -30,7 +30,8 @@ class CoTStrategy(BaseReasoningStrategy):
         raw_reasoning = await self.gateway.execute_raw(
             prompt=reasoning_prompt,
             model=model,
-            agent_role="Factual Agent (CoT - Reasoning Phase)"
+            agent_role="Factual Agent (CoT - Reasoning Phase)",
+            timeout=Config.MAP_REQUEST_TIMEOUT
         )
 
         extraction_prompt = f"""
@@ -45,7 +46,8 @@ class CoTStrategy(BaseReasoningStrategy):
             schema_class=CoTTransientOutput,
             model=model,
             agent_role="Factual Agent (CoT - Extraction Phase)",
-            max_tokens=Config.MAP_MAX_TOKENS
+            max_tokens=Config.MAP_MAX_TOKENS,
+            timeout=Config.MAP_REQUEST_TIMEOUT
         )
 
         return FactualOutput(

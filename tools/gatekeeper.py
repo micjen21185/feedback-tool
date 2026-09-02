@@ -1,3 +1,4 @@
+from core.config_loader import Config
 from core.llm_gateway import LLMGateway
 from models.schemas import ChunkPayload
 
@@ -20,7 +21,8 @@ class KnowledgeGatekeeper:
             model=self.model,
             agent_role="Knowledge Gatekeeper",
             max_tokens=5,
-            temperature=0.0
+            temperature=0.0,
+            timeout=Config.MAP_REQUEST_TIMEOUT
         )
 
         normalized = response.strip().upper()
