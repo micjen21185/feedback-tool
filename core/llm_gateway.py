@@ -25,8 +25,9 @@ _MODEL_MAX_OUTPUT_TOKENS = {
     "claude-3-5-sonnet-20240620": 4096,
 }
 
-# Substrings that indicate the local Ollama runner was killed (almost always OOM). Retrying
-# these is pointless — the memory situation is identical on the next attempt — so we fail fast.
+# Substrings that indicate a NON-retryable failure. Retrying these is pointless — the situation
+# is identical on the next attempt — so we fail fast instead of churning through 4 backoff cycles.
+# Covers: OOM / killed local runner, AND "model not found" (wrong/absent Ollama model name).
 _FATAL_LOCAL_MARKERS = (
     "process has terminated",
     'signal "killed"',
@@ -34,12 +35,47 @@ _FATAL_LOCAL_MARKERS = (
     "out of memory",
     "cudamalloc",
     "failed to allocate",
+    "model not found",
+    "model '",  # ollama: "model 'X' not found, try pulling it first"
+    "not found, try pulling",
+    "no such model",
+    "pull the model",
 )
 
 
 def _is_fatal_local_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return any(marker in msg for marker in _FATAL_LOCAL_MARKERS)
+
+
+def check_ollama_models(models: list, api_base: Optional[str] = None) -> list:
+    """Preflight: return the subset of the given ollama/* models that are NOT present on the
+    Ollama server. Empty list = all good. Used to fail fast with a clear message instead of
+    hanging/erroring mid-run on a model-name mismatch. Non-ollama models are ignored.
+    Network/parse errors return [] (don't block the run on a flaky preflight)."""
+    import urllib.request
+    import json as _json
+
+    base = (api_base or Config.OLLAMA_API_BASE).rstrip("/")
+    wanted = [m[len("ollama/"):] for m in models if m.startswith("ollama/")]
+    if not wanted:
+        return []
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=10) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        available = {m.get("name", "") for m in data.get("models", [])}
+        # Ollama tags include an implicit ':latest'; match both bare and :latest forms.
+        available_bare = {n.split(":")[0] for n in available}
+        missing = []
+        for w in wanted:
+            if w in available:
+                continue
+            if ":" not in w and (w in available_bare or f"{w}:latest" in available):
+                continue
+            missing.append(w)
+        return missing
+    except Exception:
+        return []
 
 
 class LLMGateway:

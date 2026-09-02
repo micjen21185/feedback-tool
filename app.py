@@ -6,7 +6,7 @@ import streamlit as st
 import zipfile
 
 from core.config_loader import Config
-from core.llm_gateway import LLMGateway
+from core.llm_gateway import LLMGateway, check_ollama_models
 from core.pipelines.evaluation_engine import EvaluationEngine
 from core.pipelines.orchestrator import Orchestrator
 from models.schemas import (
@@ -366,6 +366,20 @@ if submitted and st.session_state.zip_data["is_valid"]:
 
 
         orchestrator = Orchestrator(system_config, gateway=real_gateway, progress_cb=_progress)
+
+        # Preflight: fail fast (with a clear message) if a selected Ollama model isn't on the
+        # server — otherwise the run hangs/errors mid-pipeline on "model not found".
+        selected_models = [system_config.hegemon_model, factual_model, linguistic_model, Config.UTILITY_MODEL]
+        missing_models = check_ollama_models(selected_models)
+        if missing_models:
+            status.update(label="Brakuje modeli w Ollama", state="error")
+            st.error(
+                "❌ Wybrane modele nie są dostępne na serwerze Ollama:\n\n"
+                + "\n".join(f"- `{m}`" for m in missing_models)
+                + "\n\nPobierz je (`ollama pull <nazwa>`) albo wybierz w panelu bocznym modele, "
+                  "które faktycznie masz. Sprawdź dokładne nazwy: `ollama list`."
+            )
+            st.stop()
 
         knowledge_base_bytes = uploaded_kb_pdf.getvalue() if uploaded_kb_pdf is not None else None
 
