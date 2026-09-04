@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict
 
 from core.llm_gateway import LLMGateway
@@ -5,6 +6,8 @@ from core.reasoning.reasoning_engine import ReasoningEngine
 from models.schemas import ChunkPayload, FactualOutput, LectureMetadata
 from tools.gatekeeper import KnowledgeGatekeeper
 from tools.knowledge_engine import KnowledgeEngine
+
+logger = logging.getLogger(__name__)
 
 
 class FactualAgent:
@@ -61,6 +64,11 @@ Ocena dla widowni 'Ekspert': Zaraportuj błąd (Ziemia to elipsoida obrotowa/geo
 
     async def analyze(self, chunk: ChunkPayload, metadata: LectureMetadata, use_tools: bool) -> FactualOutput:
         clean_text = chunk.text_data.clean_text
+        # Diagnostic: empty input means empty output on ANY model — surface it rather than
+        # silently returning a blank analysis that looks like "nothing found".
+        if not (clean_text or "").strip():
+            logger.warning("FactualAgent: chunk %s has EMPTY clean_text — nothing to analyze "
+                           "(check ZIP parsing / chunk field names).", chunk.chunk_meta.index)
         slide_ocr = chunk.context_data.pdf_text if chunk.context_data.pdf_text else "Brak danych OCR dla tego slajdu."
 
         pedagogical_rules = self._build_factual_context_rules(metadata.knowledge_level)
