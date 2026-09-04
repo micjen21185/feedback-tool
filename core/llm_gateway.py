@@ -290,6 +290,41 @@ class LLMGateway:
                 parsed_data[field_name] = [] if is_list else ""
         return parsed_data
 
+    @staticmethod
+    def _repair_json(text: str):
+        """Best-effort recovery of JSON-ish output from small models: strip trailing prose after
+        the last closing brace, remove trailing commas, and normalize smart quotes. Returns a
+        parsed dict/list on success, else None. Does NOT fabricate content — only fixes syntax."""
+        import json as _json
+        s = (text or "").strip()
+        if not s:
+            return None
+        # Isolate the outermost {...} if there's leading/trailing prose.
+        first, last = s.find("{"), s.rfind("}")
+        if first != -1 and last != -1 and last > first:
+            s = s[first:last + 1]
+        # Normalize common small-model quirks.
+        s = s.replace("“", '"').replace("”", '"').replace("’", "'")
+        s = re.sub(r",\s*([}\]])", r"\1", s)  # trailing commas before } or ]
+        for candidate in (s, s.replace("'", '"')):
+            try:
+                return _json.loads(candidate)
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _looks_empty(obj: BaseModel) -> bool:
+        """True if a parsed structured object has no meaningful content — a sign the parse failed
+        rather than the model genuinely finding nothing. Checks common content fields."""
+        d = obj.model_dump()
+        content_keys = ("thematic_summary", "factual_errors", "scored_errors", "anomalies",
+                        "scored_anomalies", "dominant_tendencies", "justification")
+        present = [k for k in content_keys if k in d]
+        if not present:
+            return False  # schema has no content fields we track → don't flag
+        return all(not d.get(k) for k in present)
+
     async def execute_structured(
             self, prompt: str, schema_class: type[BaseModel], model: str,
             agent_role: str = "Unassigned Agent", retry_on_timeout: bool = True, **kwargs
@@ -319,10 +354,30 @@ class LLMGateway:
                                                       retry_on_timeout=retry_on_timeout)
         raw_text = self._message_text(response)
 
+        # Parse chain: strict JSON → tolerant JSON repair → XML-tag fallback. Small local models
+        # (e.g. llama3.1:8b) often emit JSON-ish output with fences/trailing commas/extra prose, or
+        # ignore the tag format entirely — which previously produced an ALL-EMPTY object that then
+        # looked like "no findings / perfect speech". We now try harder and log a real parse miss.
+        parsed = None
         try:
-            return schema_class.model_validate(json.loads(self._extract_json_object(raw_text)))
+            parsed = schema_class.model_validate(json.loads(self._extract_json_object(raw_text)))
         except (json.JSONDecodeError, ValidationError):
-            return schema_class.model_validate(self._parse_xml_fallback(raw_text, schema_class))
+            repaired = self._repair_json(self._extract_json_object(raw_text))
+            if repaired is not None:
+                try:
+                    parsed = schema_class.model_validate(repaired)
+                except ValidationError:
+                    parsed = None
+        if parsed is None:
+            parsed = schema_class.model_validate(self._parse_xml_fallback(raw_text, schema_class))
+
+        # Diagnostic: if the model clearly produced text (tokens spent) but every meaningful field
+        # came back empty, the parse FAILED — surface it instead of silently scoring it as clean.
+        if raw_text.strip() and self._looks_empty(parsed):
+            logger.warning("[%s] structured parse yielded an EMPTY object from %d chars of model output "
+                           "(model=%s). Raw head: %s",
+                           agent_role, len(raw_text), model, raw_text[:300].replace("\n", " "))
+        return parsed
 
     async def execute_raw(
             self, prompt: str, model: str, agent_role: str = "Unassigned Agent",
