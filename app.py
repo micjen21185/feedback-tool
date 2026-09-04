@@ -227,8 +227,65 @@ def _fmt_score(value) -> str:
     return f"{value}/100" if value is not None else "nie dotyczy"
 
 
-def render_report(report):
+def _report_markdown(report, title: str = "Raport") -> str:
+    """Full, thesis-injectable Markdown for a SINGLE report — scores, analysis, the mentoring
+    essay, strengths/areas/tips, unverified claims, and a compact telemetry line."""
+    a, fb, sc, tel = report.analysis, report.feedback, report.scorecard, report.telemetry
+    lines = [f"# {title}", ""]
+    if sc is not None:
+        parts = [f"**Ocena łączna:** {sc.overall_score}/100 — {sc.readiness_verdict}"]
+        if sc.factual_score is not None:
+            parts.append(f"Merytoryka: {sc.factual_score}/100")
+        if sc.linguistic_score is not None:
+            parts.append(f"Język: {sc.linguistic_score}/100")
+        if sc.slide_coverage_score is not None:
+            parts.append(f"Pokrycie slajdów: {sc.slide_coverage_score}/100")
+        lines += ["  |  ".join(parts), ""]
+
+    lines += ["## Podsumowanie merytoryczne", a.factual_summary or "_(brak)_", ""]
+    lines += ["## Analiza językowa", a.linguistic_summary or "_(brak)_", ""]
+    if a.missed_context:
+        lines += ["## Pominięte wątki", *[f"- {c}" for c in a.missed_context], ""]
+    if a.unverified_claims:
+        lines += ["## ⚠️ Twierdzenia wymagające weryfikacji (niepotwierdzone w źródłach)",
+                  *[f"- {c}" for c in a.unverified_claims], ""]
+    if a.presentation_flow is not None:
+        lines += ["## Przepływ prezentacji", a.presentation_flow.flow_summary or "_(brak)_", ""]
+        for cov in a.slide_coverage:
+            lines.append(f"- **Slajd {cov.slide_id}** ({cov.time_on_slide_sec}s, {cov.dwell_verdict}): "
+                         f"omówione: {'; '.join(cov.covered_points) or '—'} | "
+                         f"pominięte: {'; '.join(cov.missed_points) or '—'}")
+        if a.slide_coverage:
+            lines.append("")
+
+    lines += ["## Feedback mentorski", fb.executive_summary_markdown or "_(brak)_", ""]
+    if fb.strengths:
+        lines += ["### Mocne strony", *[f"- {s}" for s in fb.strengths], ""]
+    if fb.areas_for_improvement:
+        lines += ["### Obszary do poprawy", *[f"- {x}" for x in fb.areas_for_improvement], ""]
+    if fb.actionable_tips:
+        lines += ["### Wskazówki", *[f"- {t}" for t in fb.actionable_tips], ""]
+    if fb.overall_message:
+        lines += ["### Główne przesłanie", fb.overall_message, ""]
+
+    lines += ["---",
+              f"_Telemetria: koszt ${tel.total_cost_usd:.4f}, "
+              f"tokeny {tel.total_tokens_in + tel.total_tokens_out} "
+              f"(map {tel.map_phases_count}, reduce {tel.reduce_phases_count}), "
+              f"czas {tel.total_time_s:.1f}s._"]
+    return "\n".join(lines)
+
+
+def render_report(report, key: str = "report", title: str = "Raport z analizy"):
     """Render a FinalReport. Called from the persistent view so it survives Streamlit reruns."""
+    # Thesis-ready Markdown download for THIS report (all render_report call sites get it).
+    st.download_button(
+        "⬇️ Pobierz ten raport (Markdown)",
+        data=_report_markdown(report, title),
+        file_name=f"{key}.md",
+        mime="text/markdown",
+        key=f"dl_{key}",
+    )
     if report.scorecard is not None:
         sc = report.scorecard
         st.subheader(f"🏁 Ocena łączna: {sc.overall_score}/100 — {sc.readiness_verdict}")
@@ -581,7 +638,8 @@ if st.session_state.evaluated_reports:
         index=default_idx,
         key="report_view_selector"
     )
-    render_report(st.session_state.evaluated_reports[chosen]["report"])
+    render_report(st.session_state.evaluated_reports[chosen]["report"],
+                  key=f"view_{chosen}", title=f"Raport — {chosen}")
 
 # =========================================================================
 # SEKCJA WSADOWA: uruchom wiele scenariuszy na wybranych modelach, oceń i pobierz raport
@@ -817,7 +875,7 @@ if st.session_state.map_results:
             st.session_state.runs.append(_rr)
             rstatus.update(label="REDUCE zakończony.", state="complete")
         st.success(f"✅ Reduce gotowy (Hegemon={_reduce_hegemon}). Zapisano jako run {_rr.run_id}.")
-        render_report(_report)
+        render_report(_report, key=f"reduce_{_rr.run_id}", title=_rr.scenario_name)
 
 # =========================================================================
 # SEKCJA EWALUACJI / PORÓWNANIA SCENARIUSZY (LLM-as-judge + telemetria)
