@@ -866,6 +866,19 @@ if st.session_state.zip_data["is_valid"]:
                 mstatus.write(f"   ⚠️ Nie udało się zapisać fazy MAP na dysk: {_e}")
             mstatus.update(label="Faza MAP zakończona.", state="complete")
         st.success(f"✅ Zapisano fazę MAP: {_mr.map_id} ({_mr.total_windows} okien).")
+        # Per-chunk visibility: exactly what each agent returned for each window.
+        _substantive = _mr.substantive_windows
+        if _substantive == 0 and _mr.total_windows:
+            st.error(
+                f"⚠️ UWAGA: 0/{_mr.total_windows} okien z treścią merytoryczną — agenci nie zwrócili "
+                "użytecznych wyników (możliwy problem z parsowaniem lub modelem). Sprawdź ślad poniżej "
+                "oraz ostrzeżenia w konsoli ('structured parse yielded an EMPTY object')."
+            )
+        with st.expander(f"🔬 Ślad fazy MAP per okno ({_substantive}/{_mr.total_windows} z treścią)"):
+            if _mr.map_trace:
+                st.text_area("map_trace", "\n".join(_mr.map_trace), height=400, key=f"trace_{_mr.map_id}")
+            else:
+                st.info("Brak śladu.")
         st.download_button("⬇️ Pobierz fazę MAP (JSON)", data=_mr.model_dump_json(indent=2),
                            file_name=f"map_{_mr.map_id}.json", mime="application/json")
 else:

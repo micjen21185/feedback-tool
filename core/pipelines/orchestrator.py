@@ -159,6 +159,7 @@ class Orchestrator:
             map_timestamps=combine.get("map_timestamps", []),
             substantive_windows=combine.get("substantive_windows", 0),
             total_windows=combine.get("total_windows", 0),
+            map_trace=combine.get("map_trace", []),
             presentation_context=presentation_context,
             duration_sec=metadata.total_duration_sec,
             target_audience=metadata.target_audience,

@@ -429,6 +429,10 @@ class MapResult(BaseModel):
     map_timestamps: List[float] = Field(default_factory=list)
     substantive_windows: int = 0
     total_windows: int = 0
+    # Per-chunk diagnostic trace of what EACH agent returned (factual errors, anomalies, thematic
+    # summary, verification statuses). Lets you see exactly what each batch produced instead of
+    # only the aggregated combine output — essential for debugging weak/empty map phases.
+    map_trace: List[str] = Field(default_factory=list)
     # Presentation extras (scenario 5) so a saved presentation map can still be reduced faithfully.
     presentation_context: str = ""
     duration_sec: float = 0.0

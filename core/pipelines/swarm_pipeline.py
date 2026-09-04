@@ -75,6 +75,10 @@ class SwarmNaivePipeline:
             if r.error_texts():
                 map_ts.add(round(r.start_time, 1))
 
+        # Per-chunk diagnostic trace: what did EACH agent actually return? This is the visibility
+        # that was missing — lets you see empty vs. populated findings per window.
+        map_trace = self._build_map_trace(ling_results, fact_results)
+
         return {
             "thematic_blocks": thematic_blocks,
             "behavioral_profiles": behavioral_profiles,
@@ -83,7 +87,35 @@ class SwarmNaivePipeline:
             "map_timestamps": sorted(map_ts),
             "total_windows": len(fact_results),
             "substantive_windows": sum(1 for r in fact_results if (r.thematic_summary or "").strip()),
+            "map_trace": map_trace,
         }
+
+    @staticmethod
+    def _build_map_trace(ling_results, fact_results) -> list:
+        """One line per chunk showing what each agent produced — for debugging map quality."""
+        by_time = {}
+        for f in fact_results:
+            e = by_time.setdefault(round(f.start_time, 1), {})
+            e["fact_errors"] = f.error_texts()
+            e["fact_summary"] = (f.thematic_summary or "").strip()
+            e["fact_status"] = [
+                (it.verification_status.value if hasattr(it.verification_status, "value") else str(
+                    it.verification_status))
+                for it in f.scored_errors
+            ]
+        for l in ling_results:
+            e = by_time.setdefault(round(l.start_time, 1), {})
+            e["ling_anomalies"] = l.anomaly_texts()
+            e["ling_tendency"] = (l.dominant_tendencies or "").strip()
+        trace = []
+        for t in sorted(by_time):
+            e = by_time[t]
+            trace.append(
+                f"[{t}s] FAKTY: summary={e.get('fact_summary') or '∅'} | "
+                f"errors={e.get('fact_errors') or []} | status={e.get('fact_status') or []}  ||  "
+                f"JĘZYK: anomalie={e.get('ling_anomalies') or []} | tendencja={e.get('ling_tendency') or '∅'}"
+            )
+        return trace
 
     async def run_reduce(self, metadata: LectureMetadata, combine: dict,
                          presentation_context: str = "") -> HegemonOutput:
