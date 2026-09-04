@@ -19,7 +19,12 @@ class ZeroShotStrategy(BaseReasoningStrategy):
 <WYPOWIEDŹ DO OCENY>
 {chunk.text_data.clean_text}
 
-Przeanalizuj powyższą wypowiedź. Jeśli znajdziesz błędy merytoryczne (niebędące dozwolonymi uproszczeniami), wpisz je na listę. Stwórz krótkie podsumowanie tematyczne.
+ZADANIE (wykonaj OBA kroki):
+1. ZAWSZE wypełnij pole `thematic_summary`: 1–2 zdania streszczające, O CZYM MÓWI ten fragment (temat, tezy).
+   To pole jest OBOWIĄZKOWE i nigdy nie może być puste — nawet gdy nie ma żadnych błędów.
+2. Jeśli w wypowiedzi są twarde błędy merytoryczne (nie licząc dozwolonych uproszczeń dla widowni),
+   wypisz je w `scored_errors` (z wagą severity i, jeśli podano źródło, statusem weryfikacji).
+   Jeśli błędów nie ma — zostaw `scored_errors` pustą listą. Brak błędów jest normalny.
 """
         output: FactualOutput = await self.gateway.execute_structured(
             prompt=prompt,

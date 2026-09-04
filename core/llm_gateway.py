@@ -342,8 +342,12 @@ class LLMGateway:
             call_kwargs.update(kwargs)
             response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs,
                                                           retry_on_timeout=retry_on_timeout)
-            if hasattr(response.choices[0].message, 'parsed') and response.choices[0].message.parsed:
-                return response.choices[0].message.parsed
+            parsed_obj = getattr(response.choices[0].message, 'parsed', None) if response.choices else None
+            raw_head = (self._message_text(response)[:200] or "∅").replace("\n", " ")
+            logger.info("[%s] commercial response_format: parsed=%s | raw head=%s",
+                        agent_role, "yes" if parsed_obj else "NO/empty", raw_head)
+            if parsed_obj:
+                return parsed_obj
 
         call_kwargs = {
             "model": model,
@@ -353,6 +357,12 @@ class LLMGateway:
         response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs,
                                                       retry_on_timeout=retry_on_timeout)
         raw_text = self._message_text(response)
+
+        # DIAGNOSTIC (temporary): log the raw model response length + head for every structured
+        # call, so an empty/garbled agent result can be traced to what the model ACTUALLY returned
+        # vs. a parsing problem. Remove once map output is confirmed healthy.
+        logger.info("[%s] raw structured response: %d chars | head=%s",
+                    agent_role, len(raw_text), (raw_text[:200] or "∅").replace("\n", " "))
 
         # Parse chain: strict JSON → tolerant JSON repair → XML-tag fallback. Small local models
         # (e.g. llama3.1:8b) often emit JSON-ish output with fences/trailing commas/extra prose, or
