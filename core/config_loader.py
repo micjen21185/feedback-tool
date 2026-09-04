@@ -19,12 +19,11 @@ class Config:
     #     (or http://localhost:11434 when running the app outside Docker).
     OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434")
 
-    # Controls thinking/reasoning on Ollama's OpenAI-compatible endpoint (there is no think=
-    # flag there — Ollama maps the standard `reasoning_effort` param). "none" disables thinking
-    # so the whole output budget goes to the actual report instead of being burned on a hidden
-    # reasoning trace (which was arriving in `reasoning_content` with empty `content`).
-    # Set to "low"/"medium"/"high" to re-enable reasoning, or "" to omit the param entirely.
-    OLLAMA_REASONING_EFFORT = os.getenv("OLLAMA_REASONING_EFFORT", "none")
+    # Controls thinking/reasoning on Ollama's OpenAI-compatible endpoint via the standard
+    # `reasoning_effort` param. DEFAULT EMPTY (disabled): forcing this on non-thinking models
+    # (e.g. llama3.1:8b) or on Ollama versions that don't support it can cause EMPTY responses.
+    # Only set it (e.g. "none") for genuine thinking models that flood reasoning_content.
+    OLLAMA_REASONING_EFFORT = os.getenv("OLLAMA_REASONING_EFFORT", "")
 
     # LLMLingua-2 prompt-compression model. Must be a real HF identifier — the small multilingual
     # BERT is the right default (handles Polish, task-agnostic, small/fast). The previous value

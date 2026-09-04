@@ -383,10 +383,30 @@ class LLMGateway:
 
         # Diagnostic: if the model clearly produced text (tokens spent) but every meaningful field
         # came back empty, the parse FAILED — surface it instead of silently scoring it as clean.
-        if raw_text.strip() and self._looks_empty(parsed):
-            logger.warning("[%s] structured parse yielded an EMPTY object from %d chars of model output "
-                           "(model=%s). Raw head: %s",
-                           agent_role, len(raw_text), model, raw_text[:300].replace("\n", " "))
+        if self._looks_empty(parsed):
+            # Report the RAW content shape/value so we can tell "model returned nothing" from
+            # "model returned content we mis-parsed". Also dump to disk for inspection.
+            try:
+                msg = response.choices[0].message if response.choices else None
+                content_type = type(getattr(msg, "content", None)).__name__
+            except Exception:
+                content_type = "?"
+            logger.warning("[%s] structured parse EMPTY. model=%s | raw_len=%d | content_type=%s | head=%s",
+                           agent_role, model, len(raw_text), content_type,
+                           raw_text[:500].replace("\n", " ") or "∅")
+            try:
+                import os
+                os.makedirs("debug_raw", exist_ok=True)
+                with open(os.path.join("debug_raw", f"empty_{agent_role[:20].replace(' ', '_')}.txt"),
+                          "w", encoding="utf-8") as _fh:
+                    _fh.write(f"model={model}\ncontent_type={content_type}\nraw_len={len(raw_text)}\n\n")
+                    _fh.write("=== RAW TEXT ===\n" + (raw_text or "(empty)") + "\n\n")
+                    try:
+                        _fh.write("=== FULL RESPONSE ===\n" + str(response)[:5000])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         return parsed
 
     async def execute_raw(
