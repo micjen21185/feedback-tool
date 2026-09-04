@@ -227,6 +227,32 @@ def _fmt_score(value) -> str:
     return f"{value}/100" if value is not None else "nie dotyczy"
 
 
+def _reports_from_uploaded_json(raw: str, filename: str) -> list:
+    """Parse an uploaded JSON into a list of (label, FinalReport). Accepts three shapes:
+    a bare FinalReport, a RunResult (has .report), or a BatchExport (has .runs[].report)."""
+    from models.schemas import FinalReport, RunResult, BatchExport
+    out = []
+    # Try BatchExport first (richest), then RunResult, then bare FinalReport.
+    try:
+        be = BatchExport.model_validate_json(raw)
+        if be.runs:
+            for rr in be.runs:
+                out.append((f"{rr.scenario_name} · {rr.models.hegemon_model.split('/')[-1]}", rr.report))
+            return out
+    except Exception:
+        pass
+    try:
+        rr = RunResult.model_validate_json(raw)
+        return [(f"{rr.scenario_name} · {rr.models.hegemon_model.split('/')[-1]}", rr.report)]
+    except Exception:
+        pass
+    try:
+        fr = FinalReport.model_validate_json(raw)
+        return [(filename.rsplit(".", 1)[0], fr)]
+    except Exception:
+        return []
+
+
 def _report_markdown(report, title: str = "Raport") -> str:
     """Full, thesis-injectable Markdown for a SINGLE report — scores, analysis, the mentoring
     essay, strengths/areas/tips, unverified claims, and a compact telemetry line."""
@@ -278,14 +304,25 @@ def _report_markdown(report, title: str = "Raport") -> str:
 
 def render_report(report, key: str = "report", title: str = "Raport z analizy"):
     """Render a FinalReport. Called from the persistent view so it survives Streamlit reruns."""
-    # Thesis-ready Markdown download for THIS report (all render_report call sites get it).
-    st.download_button(
-        "⬇️ Pobierz ten raport (Markdown)",
-        data=_report_markdown(report, title),
-        file_name=f"{key}.md",
-        mime="text/markdown",
-        key=f"dl_{key}",
-    )
+    # Thesis-ready Markdown + re-loadable JSON download for THIS report. The JSON is a full
+    # FinalReport — save it and later upload it to the judge (see the upload-comparison section).
+    _dc1, _dc2 = st.columns(2)
+    with _dc1:
+        st.download_button(
+            "⬇️ Pobierz ten raport (Markdown)",
+            data=_report_markdown(report, title),
+            file_name=f"{key}.md",
+            mime="text/markdown",
+            key=f"dl_md_{key}",
+        )
+    with _dc2:
+        st.download_button(
+            "⬇️ Pobierz do sędziego (JSON)",
+            data=report.model_dump_json(indent=2),
+            file_name=f"{key}.report.json",
+            mime="application/json",
+            key=f"dl_json_{key}",
+        )
     if report.scorecard is not None:
         sc = report.scorecard
         st.subheader(f"🏁 Ocena łączna: {sc.overall_score}/100 — {sc.readiness_verdict}")
@@ -991,3 +1028,75 @@ else:
             f"Tokeny sędziego: {eval_report.judge_tokens_in + eval_report.judge_tokens_out}. {eval_report.summary}"
         )
         eval_gateway.reset_session_telemetry()
+
+# =========================================================================
+# SEKCJA: WGRAJ ZAPISANE RAPORTY I OCEŃ SĘDZIĄ (cross-session compare)
+# =========================================================================
+st.divider()
+st.header("📤 Wgraj zapisane raporty do porównania sędzią")
+st.caption(
+    "Wczytaj pliki JSON pobrane wcześniej (raport pojedynczy, wsad, lub RunResult) — z różnych sesji — "
+    "i oceń je razem jednym sędzią. Porównuj tylko raporty z TEGO SAMEGO wystąpienia."
+)
+
+uploaded_reports = st.file_uploader(
+    "Pliki JSON raportów (możesz wybrać wiele):", type="json", accept_multiple_files=True, key="judge_upload"
+)
+up_judge_model = st.selectbox("Model sędziego:", options=Config.get_all_models(), index=0, key="upload_judge_model")
+up_judge_cfg = _judge_config_controls("upload")
+up_excerpt = st.text_area(
+    "Fragment transkrypcji dla osadzenia (opcjonalnie — wklej treść wystąpienia):", value="", height=150,
+    key="upload_excerpt",
+    help="Bez tego sędzia ocenia jakość raportów, ale nie może zweryfikować ich zgodności z transkrypcją."
+)
+
+if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_uploaded"):
+    parsed = []  # list[(label, FinalReport)]
+    for f in uploaded_reports:
+        try:
+            content = f.getvalue().decode("utf-8")
+        except Exception:
+            content = f.read().decode("utf-8", errors="ignore")
+        got = _reports_from_uploaded_json(content, f.name)
+        if not got:
+            st.warning(f"Pominięto `{f.name}` — nie rozpoznano formatu (oczekiwano FinalReport/RunResult/BatchExport).")
+        parsed.extend(got)
+
+    if len(parsed) < 1:
+        st.error("Brak poprawnych raportów do oceny.")
+    else:
+        # De-duplicate labels so the judge's report dict keys are unique.
+        reports = {}
+        for label, rep in parsed:
+            uniq = label
+            i = 2
+            while uniq in reports:
+                uniq = f"{label} #{i}"
+                i += 1
+            reports[uniq] = rep
+        st.info(f"Wczytano {len(reports)} raportów: {', '.join(reports.keys())}")
+        with st.spinner("Sędzia ocenia wgrane raporty..."):
+            up_gateway = LLMGateway(ObservabilityManager())
+            up_engine = EvaluationEngine(up_gateway, up_judge_model, **up_judge_cfg)
+            up_eval = asyncio.run(up_engine.evaluate(up_excerpt, reports, duration_sec=0.0))
+            up_gateway.reset_session_telemetry()
+
+        rows = []
+        for se in up_eval.per_scenario:
+            rows.append({
+                "Raport": se.scenario_name,
+                "Jakość (0-50)": se.rubric_total,
+                "Osadzenie w faktach": se.rubric.groundedness,
+                "Trafność": se.rubric.correctness,
+                "Koszt ($)": round(se.total_cost_usd, 5),
+                "Koszt / pkt jakości ($)": round(se.total_cost_usd / se.rubric_total, 6) if se.rubric_total else None,
+                "Zagubienie w środku": "⚠️ TAK" if se.lost_in_middle_flag else "nie",
+            })
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        if up_eval.pairwise:
+            st.subheader("⚔️ Preferencje parami")
+            for pref in up_eval.pairwise:
+                st.markdown(f"- **Zwycięzca: {pref.winner}** — {pref.reason}")
+        st.caption(
+            f"Tokeny sędziego: {up_eval.judge_tokens_in + up_eval.judge_tokens_out}. {up_eval.summary}"
+        )
