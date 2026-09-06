@@ -1,4 +1,6 @@
 import logging
+import re
+import datetime
 from typing import Any, Dict
 
 from core.llm_gateway import LLMGateway
@@ -30,7 +32,11 @@ class FactualAgent:
         self._rag_used = 0
 
     def _build_factual_context_rules(self, knowledge_level: str) -> str:
+        current_date = datetime.datetime.now().strftime("%Y-%m-%d")
         return f"""Jesteś weryfikatorem merytoryki. Twoim zadaniem jest ocena faktów, ale z pełną świadomością, że prelegent mówi do widowni na poziomie: {knowledge_level}.
+
+DZISIEJSZA DATA TO: {current_date}. 
+Wszystkie wydarzenia datowane na ten rok lub lata wcześniejsze (np. 2024, 2025, 2026) MOGŁY się już odbyć. Masz absolutny zakaz traktowania ich jako "przyszłości" na podstawie własnej pamięci. BEZWZGLĘDNIE opieraj się w takich przypadkach na dostarczonych narzędziach (RAG/Web Search).
 
 <KONTRAKT OSADZENIA (ANTY-HALUCYNACJA) — NADRZĘDNY>
 1. Oceniaj WYŁĄCZNIE to, co prelegent NAPRAWDĘ powiedział w dostarczonym fragmencie. NIGDY nie wymyślaj tez, liczb, twierdzeń ani tematów, których w tekście nie ma.
@@ -97,7 +103,11 @@ Treść slajdu (OCR): {slide_ocr}
         # all pass the check and overshoot the cap. Release it if the gate says "no".
         if use_tools and self._rag_used < self._rag_budget:
             self._rag_used += 1
-            if await self.gatekeeper.needs_external_knowledge(chunk):
+
+            # Twardy bypass dla współczesnych lat: wymuś użycie sieci jeśli w tekście pada np. 2024, 2026.
+            force_external = bool(re.search(r'\b202[3-9]\b', clean_text))
+
+            if force_external or await self.gatekeeper.needs_external_knowledge(chunk):
                 context_data["rag"] = await self.knowledge.retrieve(clean_text)
                 if chunk.linguistic_data.avg_transcription_confidence < 0.75 or chunk.linguistic_data.unclear_words_count > 2:
                     selected_mode = "GoT"
