@@ -59,7 +59,12 @@ class KnowledgeEngine:
 
                 if self.chunks:
                     embedder = self._get_embedder()
-                    embeddings = embedder.encode(self.chunks)
+                    embeddings = embedder.encode(
+                        self.chunks,
+                        batch_size=32,
+                        show_progress_bar=True,
+                        device='cpu'
+                    )
                     dimension = embeddings.shape[1]
                     self.index = faiss.IndexFlatL2(dimension)
                     self.index.add(np.array(embeddings).astype('float32'))
