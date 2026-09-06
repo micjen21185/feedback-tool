@@ -840,31 +840,42 @@ if st.session_state.zip_data["is_valid"]:
             _gw = LLMGateway(ObservabilityManager())
             _orch = Orchestrator(_cfg, gateway=_gw, progress_cb=lambda m: mstatus.write(m))
             _zd = st.session_state.zip_data
-            _mr = _orch.execute_map_only(
-                metadata=LectureMetadata(
-                    speaker_role=speaker_role, target_audience=target_audience, main_topic=main_topic,
-                    knowledge_level=knowledge_level,
-                    total_duration_sec=_zd["metadata"].get("total_duration_sec", 0.0),
-                    total_words=_zd["metadata"].get("total_words", 0),
-                ),
-                chunks=[ChunkPayload(**c) for c in _zd.get("chunks", [])],
-                timeline=TimelinePayload(**_zd["timeline"]) if _zd.get("timeline") else None,
-                slide_summaries={k: SlideSummary(**v) for k, v in _zd.get("slide_summaries", {}).items()},
-                knowledge_base_bytes=map_kb_pdf.getvalue() if map_kb_pdf is not None else None,
-                source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
-                input_fingerprint=hashlib.sha256(_zd["raw_text"].encode("utf-8")).hexdigest(),
-            )
-            st.session_state.map_results.append(_mr)
             try:
-                import os
+                _mr = _orch.execute_map_only(
+                    metadata=LectureMetadata(
+                        speaker_role=speaker_role, target_audience=target_audience, main_topic=main_topic,
+                        knowledge_level=knowledge_level,
+                        total_duration_sec=_zd["metadata"].get("total_duration_sec", 0.0),
+                        total_words=_zd["metadata"].get("total_words", 0),
+                    ),
+                    chunks=[ChunkPayload(**c) for c in _zd.get("chunks", [])],
+                    timeline=TimelinePayload(**_zd["timeline"]) if _zd.get("timeline") else None,
+                    slide_summaries={k: SlideSummary(**v) for k, v in _zd.get("slide_summaries", {}).items()},
+                    knowledge_base_bytes=map_kb_pdf.getvalue() if map_kb_pdf is not None else None,
+                    source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
+                    input_fingerprint=hashlib.sha256(_zd["raw_text"].encode("utf-8")).hexdigest(),
+                )
 
-                os.makedirs(Config.MAPS_DIR, exist_ok=True)
-                with open(os.path.join(Config.MAPS_DIR, f"map_{_mr.map_id}.json"), "w",
-                          encoding="utf-8") as _fh:
-                    _fh.write(_mr.model_dump_json(indent=2))
-            except Exception as _e:
-                mstatus.write(f"   ⚠️ Nie udało się zapisać fazy MAP na dysk: {_e}")
-            mstatus.update(label="Faza MAP zakończona.", state="complete")
+                st.session_state.map_results.append(_mr)
+                try:
+                    import os
+
+                    os.makedirs(Config.MAPS_DIR, exist_ok=True)
+                    with open(os.path.join(Config.MAPS_DIR, f"map_{_mr.map_id}.json"), "w",
+                              encoding="utf-8") as _fh:
+                        _fh.write(_mr.model_dump_json(indent=2))
+                except Exception as _e:
+                    mstatus.write(f"   ⚠️ Nie udało się zapisać fazy MAP na dysk: {_e}")
+                mstatus.update(label="Faza MAP zakończona.", state="complete")
+
+            except Exception as e:
+                crash_msg = f"Krytyczny błąd podczas fazy MAP: {type(e).__name__} - {str(e)}"
+                import logging
+
+                logging.getLogger(__name__).error(f"[FATAL] {crash_msg}", exc_info=True)
+                mstatus.write(f"❌ SYSTEM ZATRZYMANY: {crash_msg}")
+                mstatus.update(label="Faza MAP zakończona błędem", state="error")
+                st.stop()
         st.success(f"✅ Zapisano fazę MAP: {_mr.map_id} ({_mr.total_windows} okien).")
         # Per-chunk visibility: exactly what each agent returned for each window.
         _substantive = _mr.substantive_windows

@@ -234,8 +234,14 @@ class Orchestrator:
         use_tools = self.config.scenario in (
             ExperimentScenario.SWARM_NAIVE_RAG_WEB, ExperimentScenario.SWARM_PRESENTATION_RAG_WEB)
         pipeline, knowledge_engine = self._build_swarm_pipeline(use_tools=use_tools)
+
+        # --- ZMODYFIKOWANY BLOK ---
         if use_tools and knowledge_base_bytes:
+            self._log(
+                "📚 Budowa lokalnej bazy wiedzy RAG. Pobieranie modelu embedującego i wektoryzacja PDF może potrwać kilka minut...")
             await knowledge_engine.build_knowledge_base(knowledge_base_bytes)
+            self._log("✅ Baza wiedzy RAG wektoryzowana i gotowa do pracy.")
+        # --------------------------
 
         presentation_context = ""
         slide_cov = None
