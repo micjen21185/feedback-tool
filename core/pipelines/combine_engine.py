@@ -9,7 +9,14 @@ from models.schemas import LinguisticOutput, FactualOutput, LectureMetadata, rea
 logger = logging.getLogger(__name__)
 
 _SEVERITY_ORDER = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "LOW": 0}
-_SEVERITY_WEIGHT = {"CRITICAL": 15, "HIGH": 7, "MEDIUM": 3, "LOW": 1}
+
+# Nowe matryce kar - rozdzielenie wagi merytoryki od języka
+_LINGUISTIC_SEVERITY_WEIGHT = {"CRITICAL": 15, "HIGH": 7, "MEDIUM": 3, "LOW": 1}
+_FACTUAL_SEVERITY_WEIGHT = {"CRITICAL": 30, "HIGH": 15, "MEDIUM": 5, "LOW": 2}
+
+# Nowe parametry normalizacyjne
+_LINGUISTIC_WINDOW_CAP = 15  # Maksymalna liczba punktów karnych za język na jedno okno (2 minuty)
+_UNVERIFIED_PENALTY = 2  # Płaska kara za każdą plotkę / lanie wody
 
 # Track blend and readiness thresholds.
 _FACTUAL_WEIGHT = 0.6
@@ -42,7 +49,6 @@ class CombineEngine:
             try:
                 from llmlingua import PromptCompressor
                 # Correct LLMLingua-2 usage: a REAL HF model id + use_llmlingua2=True.
-                # (The old "llmlingua-small" was not a valid identifier → load error.)
                 self.compressor = PromptCompressor(
                     model_name=Config.LLMLINGUA_MODEL,
                     use_llmlingua2=True,
@@ -52,8 +58,7 @@ class CombineEngine:
                 logger.error("llmlingua is not installed. Install it (see requirements.txt).")
                 self.config.use_llmlingua = False
             except Exception as e:
-                # A bad model id / download failure must NOT crash the scenario — just disable
-                # compression and continue with the uncompressed reduce input.
+                # A bad model id / download failure must NOT crash the scenario
                 logger.error("LLMLingua load failed (%s: %s). Compression disabled for this run.",
                              type(e).__name__, e)
                 self.compressor = None
@@ -130,40 +135,51 @@ class CombineEngine:
             fact_results: List[FactualOutput],
             slide_coverage: Optional[list] = None
     ):
-        # Import here to avoid a circular import at module load.
         from models.schemas import ScoreCard
 
         n_windows = max(1, len(ling_results) or len(fact_results))
 
-        # Penalty per track = sum of severity weights, normalized per window, scaled to 0-100.
-        # Fallback: if the model returned plain items but no scored items, count each plain
-        # item at the MEDIUM weight so the score does not silently stay at 100.
-        def _track_penalty(items_scored, items_plain) -> int:
+        # --- 1. JĘZYK: Wprowadzenie sufitu kar (Cap) ---
+        def _ling_penalty(items_scored, items_plain) -> int:
             if items_scored:
-                return sum(_SEVERITY_WEIGHT.get(self._sev_value(it), 3) for it in items_scored)
-            return len(items_plain) * _SEVERITY_WEIGHT["MEDIUM"]
+                raw_penalty = sum(_LINGUISTIC_SEVERITY_WEIGHT.get(self._sev_value(it), 3) for it in items_scored)
+            else:
+                raw_penalty = len(items_plain) * _LINGUISTIC_SEVERITY_WEIGHT["MEDIUM"]
 
-        # Factual penalty EXCLUDES non-error statuses: UNVERIFIED (needs review, not proven wrong)
-        # and SUPPORTED_BY_SOURCE (matches trusted source) must NOT lower the score. Only genuine
-        # errors (CONTRADICTS_SOURCE, or plain flagged errors with no status) count.
+            # Sufit: Niezależnie czy prelegent zrobił 3 pauzy, czy 25 pauz w jednym oknie,
+            # traci maksymalnie przypisany limit (np. 15 punktów) dla tego chunka.
+            return min(raw_penalty, _LINGUISTIC_WINDOW_CAP)
+
+        # --- 2. MERYTORYKA: Progresywne kary i włączenie plotek ---
         def _fact_penalty(f_out) -> int:
-            penalizable = [
-                it for it in f_out.scored_errors
-                if self._verif_value(it) not in ("UNVERIFIED", "SUPPORTED_BY_SOURCE")
-            ]
-            if penalizable:
-                return sum(_SEVERITY_WEIGHT.get(self._sev_value(it), 3) for it in penalizable)
-            # No scored items at all → fall back to plain error list at MEDIUM.
+            penalty = 0
+            # Jeśli brak wyników otagowanych, użyj średniej wagi dla surowych błędów
             if not f_out.scored_errors:
-                return len(f_out.error_texts()) * _SEVERITY_WEIGHT["MEDIUM"]
-            return 0
+                return len(f_out.error_texts()) * _FACTUAL_SEVERITY_WEIGHT["MEDIUM"]
 
-        ling_penalty = sum(_track_penalty(l.scored_anomalies, l.anomaly_texts()) for l in ling_results)
+            for it in f_out.scored_errors:
+                verif = self._verif_value(it)
+                if verif == "SUPPORTED_BY_SOURCE":
+                    continue
+                elif verif == "UNVERIFIED":
+                    # Kary za niepotwierdzone teorie (np. wątki afery z Morawieckim)
+                    penalty += _UNVERIFIED_PENALTY
+                else:
+                    # Kłamstwa historyczne karane podwójnie wg nowej, surowszej matrycy (30 pkt za CRITICAL)
+                    penalty += _FACTUAL_SEVERITY_WEIGHT.get(self._sev_value(it), 5)
+            return penalty
+
+        ling_penalty = sum(_ling_penalty(l.scored_anomalies, l.anomaly_texts()) for l in ling_results)
         fact_penalty = sum(_fact_penalty(f) for f in fact_results)
 
-        # Normalize: each window can absorb ~one HIGH (7 pts) before the score drops materially.
-        ling_score = max(0.0, 100.0 - (ling_penalty / n_windows) * (100.0 / 21.0))
-        fact_score = max(0.0, 100.0 - (fact_penalty / n_windows) * (100.0 / 21.0))
+        # --- 3. NORMALIZACJA: Dostosowanie krzywej spadku ocen ---
+        # Dzielnik _LINGUISTIC_WINDOW_CAP (15) sprawia, że maksymalnie ukarane okno zabiera
+        # dokładnie proporcjonalny ułamek ze 100%. Wynik zatrzyma się w granicach 30-40 pkt.
+        ling_score = max(0.0, 100.0 - (ling_penalty / n_windows) * (100.0 / _LINGUISTIC_WINDOW_CAP))
+
+        # Merytoryka uderza znacznie mocniej. Jeden błąd CRITICAL (30 pkt) lub dwa HIGH (15 pkt)
+        # wystarczą, by wyzerować całkowicie wynik danego okna. Ściągnie to ocenę do ~70 pkt.
+        fact_score = max(0.0, 100.0 - (fact_penalty / n_windows) * (100.0 / 30.0))
 
         slide_score = None
         weights = {"factual": _FACTUAL_WEIGHT, "linguistic": _LINGUISTIC_WEIGHT}
@@ -171,7 +187,6 @@ class CombineEngine:
             total_pts = sum(len(c.covered_points) + len(c.missed_points) for c in slide_coverage)
             covered = sum(len(c.covered_points) for c in slide_coverage)
             slide_score = 100.0 if total_pts == 0 else round(100.0 * covered / total_pts, 1)
-            # Rebalance: factual 0.45, linguistic 0.30, slides 0.25 when presentation data exists.
             weights = {"factual": 0.45, "linguistic": 0.30, "slides": 0.25}
 
         overall = weights["factual"] * fact_score + weights["linguistic"] * ling_score
