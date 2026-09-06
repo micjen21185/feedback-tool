@@ -238,7 +238,7 @@ class LLMGateway:
         lines = []
         for name, info in schema_class.model_fields.items():
             is_list = "List" in str(info.annotation)
-            shape = "lista stringów" if is_list else "tekst"
+            shape = "lista" if is_list else "tekst"
             desc = info.description or ""
             lines.append(f"- \"{name}\" ({shape}): {desc}".rstrip())
         fields = "\n".join(lines)
@@ -342,8 +342,17 @@ class LLMGateway:
             call_kwargs.update(kwargs)
             response = await self._execute_with_telemetry(full_prompt, model, agent_role, call_kwargs,
                                                           retry_on_timeout=retry_on_timeout)
-            parsed_obj = getattr(response.choices[0].message, 'parsed', None) if response.choices else None
-            raw_head = (self._message_text(response)[:200] or "∅").replace("\n", " ")
+
+            # --- NOWY KOD ---
+            content = self._message_text(response)
+            try:
+                parsed_obj = schema_class.model_validate_json(content)
+            except ValidationError as e:
+                logger.warning(f"Structured Output Pydantic parse failed: {e}")
+                parsed_obj = None
+            # ----------------
+
+            raw_head = (content[:200] or "∅").replace("\n", " ")
             logger.info("[%s] commercial response_format: parsed=%s | raw head=%s",
                         agent_role, "yes" if parsed_obj else "NO/empty", raw_head)
             if parsed_obj:
