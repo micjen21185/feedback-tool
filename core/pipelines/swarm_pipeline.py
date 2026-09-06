@@ -171,8 +171,15 @@ class SwarmNaivePipeline:
             ling_task = self.linguistic_agent.analyze(chunk, metadata)
             fact_task = self.factual_agent.analyze(chunk, metadata, use_tools=use_tools)
 
-            ling_out, fact_out = await asyncio.gather(ling_task, fact_task)
-            batch_results.append((ling_out, fact_out))
+            try:
+                ling_out, fact_out = await asyncio.gather(ling_task, fact_task)
+                batch_results.append((ling_out, fact_out))
+            except Exception as e:
+                error_msg = f"Agent w fazie Map uległ awarii (Chunk {chunk.chunk_meta.index}): {str(e)}"
+                logger.error(f"[SWARM CRASH] {error_msg}", exc_info=True)
+                self._progress(f"🚨 AWARIA: {error_msg}")
+                batch_results.append((None, None))
+                batch_results.append((None, None))
 
             if i + 1 < len(batch):
                 if ling_out and getattr(ling_out, 'next_state', None) is not None:

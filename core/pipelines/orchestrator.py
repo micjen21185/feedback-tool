@@ -58,25 +58,32 @@ class Orchestrator:
         if chunks:
             self._log(f"📦 Wczytano {len(chunks)} chunków do analizy (faza map).")
 
-        if self.config.scenario == ExperimentScenario.MONOLITH_NAKED:
-            hegemon_out = asyncio.run(self._execute_scenario_1_monolith_naked(metadata, raw_text))
+        try:
+            if self.config.scenario == ExperimentScenario.MONOLITH_NAKED:
+                hegemon_out = asyncio.run(self._execute_scenario_1_monolith_naked(metadata, raw_text))
 
-        elif self.config.scenario == ExperimentScenario.MONOLITH_TWO_PHASE_FORMATTED:
-            hegemon_out = asyncio.run(self._execute_scenario_2_monolith_two_phase_formatted(metadata, formatted_text))
+            elif self.config.scenario == ExperimentScenario.MONOLITH_TWO_PHASE_FORMATTED:
+                hegemon_out = asyncio.run(
+                    self._execute_scenario_2_monolith_two_phase_formatted(metadata, formatted_text))
 
-        elif self.config.scenario == ExperimentScenario.SWARM_NAIVE_NO_RAG:
-            hegemon_out = asyncio.run(self._execute_scenario_3_swarm_naive_no_rag(metadata, chunks))
+            elif self.config.scenario == ExperimentScenario.SWARM_NAIVE_NO_RAG:
+                hegemon_out = asyncio.run(self._execute_scenario_3_swarm_naive_no_rag(metadata, chunks))
 
-        elif self.config.scenario == ExperimentScenario.SWARM_NAIVE_RAG_WEB:
-            hegemon_out = asyncio.run(
-                self._execute_scenario_4_swarm_naive_rag_web(metadata, chunks, knowledge_base_bytes))
+            elif self.config.scenario == ExperimentScenario.SWARM_NAIVE_RAG_WEB:
+                hegemon_out = asyncio.run(
+                    self._execute_scenario_4_swarm_naive_rag_web(metadata, chunks, knowledge_base_bytes))
 
-        elif self.config.scenario == ExperimentScenario.SWARM_PRESENTATION_RAG_WEB:
-            hegemon_out = asyncio.run(self._execute_scenario_5_swarm_presentation_rag_web(
-                metadata, chunks, timeline, slide_summaries, knowledge_base_bytes
-            ))
-        else:
-            raise ValueError("Nieznany scenariusz eksperymentu!")
+            elif self.config.scenario == ExperimentScenario.SWARM_PRESENTATION_RAG_WEB:
+                hegemon_out = asyncio.run(self._execute_scenario_5_swarm_presentation_rag_web(
+                    metadata, chunks, timeline, slide_summaries, knowledge_base_bytes
+                ))
+            else:
+                raise ValueError("Nieznany scenariusz eksperymentu!")
+        except Exception as e:
+            crash_msg = f"Krytyczny błąd orkiestratora: {type(e).__name__} - {str(e)}"
+            logger.error(f"[FATAL] {crash_msg}", exc_info=True)
+            self._log(f"❌ SYSTEM ZATRZYMANY: {crash_msg}")
+            raise
 
         session_telemetry = self.gateway.get_session_telemetry()
 

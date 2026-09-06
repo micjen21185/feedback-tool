@@ -179,10 +179,11 @@ class LLMGateway:
         try:
             response = await self._safe_acompletion(retry_on_timeout=retry_on_timeout, **call_kwargs)
         except Exception as exc:
-            # Fallback ONLY on capacity errors (rate limit / overload / quota), and only if a
-            # fallback model is configured and differs from the one that just failed. We swap the
-            # model here — not via litellm's own fallbacks — so telemetry records the model that
-            # ACTUALLY served the request (provenance matters for the research comparison).
+            # --- DODAJ TO LOGOWANIE ---
+            logger.error(
+                f"[GATEWAY ERROR] Agent: {agent_role} | Model: {model} | Błąd: {type(exc).__name__}: {str(exc)}")
+            # --------------------------
+
             fallback = Config.FALLBACK_MODEL
             if fallback and fallback != model and _is_capacity_error(exc):
                 logger.warning("[fallback] '%s' capacity error (%s) → retrying on '%s'.",
