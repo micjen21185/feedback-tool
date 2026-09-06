@@ -5,8 +5,10 @@ from typing import List, Optional
 import faiss
 import numpy as np
 import pymupdf
+import litellm
 from duckduckgo_search import DDGS
-from sentence_transformers import SentenceTransformer
+
+from core.config_loader import Config
 
 logger = logging.getLogger(__name__)
 
@@ -17,78 +19,83 @@ class KnowledgeEngine:
         self.model_name = model_name
         self.index: Optional[faiss.IndexFlatL2] = None
         self.chunks: List[str] = []
-        self._embedder: Optional[SentenceTransformer] = None
-        # Cache for web-search results only (network calls, no token cost) — keyed by query.
-        # LLM calls are intentionally NOT cached so token/cost telemetry stays accurate.
         self._web_cache: dict = {}
-
-    def _get_embedder(self) -> SentenceTransformer:
-        if self._embedder is None:
-            self._embedder = SentenceTransformer('all-MiniLM-L6-v2')
-        return self._embedder
+        self.embed_model = "ollama/nomic-embed-text"
 
     async def build_knowledge_base(self, file_bytes: bytes, is_pdf: bool = True):
-        def _parse_and_index():
-            try:
-                if is_pdf:
-                    doc = pymupdf.open(stream=file_bytes, filetype="pdf")
-                    full_text = "\n".join([page.get_text() for page in doc])
-                else:
-                    full_text = file_bytes.decode('utf-8', errors='ignore')
+        def _parse():
+            if is_pdf:
+                doc = pymupdf.open(stream=file_bytes, filetype="pdf")
+                return "\n".join([page.get_text() for page in doc])
+            return file_bytes.decode('utf-8', errors='ignore')
 
-                chunk_size = 500
-                overlap = 50
-                self.chunks = []
+        try:
+            full_text = await asyncio.to_thread(_parse)
 
-                start = 0
-                text_len = len(full_text)
+            chunk_size = 500
+            overlap = 50
+            self.chunks = []
+            start = 0
+            text_len = len(full_text)
 
-                while start < text_len:
-                    end = min(start + chunk_size, text_len)
+            while start < text_len:
+                end = min(start + chunk_size, text_len)
+                if end < text_len:
+                    last_space = full_text.rfind(' ', start, end)
+                    if last_space != -1 and (last_space - start) > overlap:
+                        end = last_space
 
-                    if end < text_len:
-                        last_space = full_text.rfind(' ', start, end)
-                        if last_space != -1 and last_space > start:
-                            end = last_space
+                chunk = full_text[start:end].strip()
+                if chunk:
+                    self.chunks.append(chunk)
 
-                    chunk = full_text[start:end].strip()
-                    if chunk:
-                        self.chunks.append(chunk)
+                if end >= text_len:
+                    break
 
-                    start = end - overlap
+                start = end - overlap
 
-                if self.chunks:
-                    embedder = self._get_embedder()
-                    embeddings = embedder.encode(
-                        self.chunks,
-                        batch_size=32,
-                        show_progress_bar=True,
-                        device='cpu'
-                    )
-                    dimension = embeddings.shape[1]
-                    self.index = faiss.IndexFlatL2(dimension)
-                    self.index.add(np.array(embeddings).astype('float32'))
-                    logger.info(f"Zaindeksowano {len(self.chunks)} semantycznych fragmentów w FAISS.")
-            except Exception as e:
-                logger.error(f"Błąd budowy lokalnej bazy RAG: {e}")
+            if not self.chunks:
+                return
 
-        await asyncio.to_thread(_parse_and_index)
+            embeddings = []
+            batch_size = 32
 
-    def _sync_search_local_rag(self, query: str) -> str:
+            for i in range(0, len(self.chunks), batch_size):
+                batch = self.chunks[i:i + batch_size]
+                response = await litellm.aembedding(
+                    model=self.embed_model,
+                    input=batch,
+                    api_base=Config.OLLAMA_API_BASE
+                )
+                for item in response.data:
+                    embeddings.append(item['embedding'])
+
+            if embeddings:
+                dimension = len(embeddings[0])
+                self.index = faiss.IndexFlatL2(dimension)
+                self.index.add(np.array(embeddings).astype('float32'))
+                logger.info(f"Zaindeksowano {len(self.chunks)} semantycznych fragmentów w FAISS (Ollama).")
+
+        except Exception as e:
+            logger.error(f"Błąd budowy lokalnej bazy RAG: {e}", exc_info=True)
+
+    async def _search_local_rag(self, query: str) -> str:
         if self.index is None or not self.chunks:
             return ""
         try:
-            embedder = self._get_embedder()
-            query_embedding = embedder.encode([query]).astype('float32')
+            response = await litellm.aembedding(
+                model=self.embed_model,
+                input=[query],
+                api_base=Config.OLLAMA_API_BASE
+            )
+            query_embedding = np.array([response.data[0]['embedding']]).astype('float32')
+
             distances, indices = self.index.search(query_embedding, k=3)
             results = [self.chunks[idx] for idx in indices[0] if idx < len(self.chunks)]
             return "\n---\n".join(results)
         except Exception as e:
-            logger.warning(f"Błąd FAISS: {e}")
+            logger.warning(f"Błąd FAISS przy wyszukiwaniu: {e}")
             return ""
-
-    async def _search_local_rag(self, query: str) -> str:
-        return await asyncio.to_thread(self._sync_search_local_rag, query)
 
     async def _generate_query(self, chunk_text: str) -> str:
         prompt = (
