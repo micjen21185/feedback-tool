@@ -58,7 +58,7 @@ class Config:
     # Output cap for per-chunk MAP agents (factual/linguistic). Their output is a small structured
     # object (a few anomalies + short summary), so bound it — across ~60 map calls an unbounded
     # response is wasted tokens and latency. ~1024 is plenty for the schema they return.
-    MAP_MAX_TOKENS = int(os.getenv("MAP_MAX_TOKENS", "1024"))
+    MAP_MAX_TOKENS = int(os.getenv("MAP_MAX_TOKENS", "2048"))
 
     # Directory for map-phase checkpoints so a crashed long run can resume mid-way.
     CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", os.getenv("LLM_BENCHMARK_DB", "llm_benchmark.db"))
@@ -85,7 +85,6 @@ class Config:
     JUDGE_PROBE_WINDOW_CHARS = int(os.getenv("JUDGE_PROBE_WINDOW_CHARS", "600"))
 
     LOCAL_MODELS = [
-        "ollama/llama3.1:70b",
         "ollama/gemma3:27b",
         "ollama/qwen3.5:35b",
         "ollama/gemma3:4b",
@@ -94,12 +93,15 @@ class Config:
         "ollama/llama3.2:1b",
         "ollama/llama3.2:3b",
         "ollama/llama3.1:8b",
-        "ollama/Speakleash/bielik-minitron-7B-v3.0-instruct:Q5_K_M",
-        "ollama/Speakleash/bielik-11b-v3.0-instruct:Q5_K_M",
+        "ollama/SpeakLeash/bielik-minitron-7B-v3.0-instruct:Q5_K_M",
+        "ollama/SpeakLeash/bielik-11b-v3.0-instruct:Q5_K_M",
         "ollama/dimpigulsky/pllum-12b",
         "ollama/bbaranow/pllum-12B-q4_k_m",
-        "ollama/antoniprzybylik/llama-pllum",
-        "ollama/antoniprzybylik/llama-pllum:70b"
+        "ollama/qwen3:14b",
+        "ollama/qwen2.5:14b",
+        "ollama/deepseek-r1:8b",
+        "ollama/deepseek-r1:14b",
+        "ollama/gemma3:12b"
     ]
 
     COMMERCIAL_MODELS = [
