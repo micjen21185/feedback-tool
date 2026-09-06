@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from typing import List, Tuple, Any
-import re
 
 from models.schemas import (
     LectureMetadata, ChunkPayload, HegemonOutput, DeepAnalysis, ConstructiveFeedback
@@ -170,11 +169,9 @@ class SwarmNaivePipeline:
 
         for i, chunk in enumerate(batch):
             ling_task = self.linguistic_agent.analyze(chunk, metadata)
+
+            # Weryfikacja RAG/Narzędzi jest już bezpiecznie obsługiwana przez wewnętrzną logikę FactualAgenta
             fact_task = self.factual_agent.analyze(chunk, metadata, use_tools=use_tools)
-            if re.search(r'\b202[3-9]\b', chunk.text):
-                use_tools = True
-            else:
-                use_tools = await self.knowledge_gatekeeper.decide(chunk)
 
             try:
                 ling_out, fact_out = await asyncio.gather(ling_task, fact_task)
@@ -183,14 +180,14 @@ class SwarmNaivePipeline:
                 error_msg = f"Agent w fazie Map uległ awarii (Chunk {chunk.chunk_meta.index}): {str(e)}"
                 logger.error(f"[SWARM CRASH] {error_msg}", exc_info=True)
                 self._progress(f"🚨 AWARIA: {error_msg}")
-                batch_results.append((None, None))
+                # Usunięto podwójne dodawanie w przypadku błędu
                 batch_results.append((None, None))
 
             if i + 1 < len(batch):
-                if ling_out and getattr(ling_out, 'next_state', None) is not None:
+                if 'ling_out' in locals() and ling_out and getattr(ling_out, 'next_state', None) is not None:
                     batch[i + 1].trailing_linguistics = ling_out.next_state
 
-                if fact_out and getattr(fact_out, 'next_state', None) is not None:
+                if 'fact_out' in locals() and fact_out and getattr(fact_out, 'next_state', None) is not None:
                     batch[i + 1].trailing_fact_summary = fact_out.next_state
 
         return batch_results
