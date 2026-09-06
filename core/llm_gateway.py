@@ -268,18 +268,19 @@ class LLMGateway:
         parsed_data = {}
         for field_name, field_info in schema_class.model_fields.items():
             annotation = str(field_info.annotation)
-            is_list = "List" in annotation or "list" in annotation
-            is_str = "str" in annotation and not is_list
 
-            # Only attempt to fill plain string or list-of-string fields from tags.
-            # Numeric / nested-model / optional fields are left to their schema defaults.
-            if not (is_list or is_str):
+            # ZMIANA: Precyzyjne sprawdzanie, czy to lista stringów, a nie jakakolwiek lista
+            is_list_of_strs = "List[str]" in annotation or "list[str]" in annotation
+            is_str = "str" in annotation and not is_list_of_strs
+
+            # Pomijamy złożone modele Pydantic (jak List[SeverityItem])
+            if not (is_list_of_strs or is_str):
                 continue
 
             match = re.search(f"<{field_name}>(.*?)</{field_name}>", raw_text, re.DOTALL | re.IGNORECASE)
             if match:
                 content = match.group(1).strip()
-                if is_list:
+                if is_list_of_strs:
                     parsed_data[field_name] = [
                         re.sub(r"^\s*[-*•]\s+", "", line).strip()
                         for line in content.split('\n')
@@ -288,7 +289,7 @@ class LLMGateway:
                 else:
                     parsed_data[field_name] = content
             else:
-                parsed_data[field_name] = [] if is_list else ""
+                parsed_data[field_name] = [] if is_list_of_strs else ""
         return parsed_data
 
     @staticmethod
