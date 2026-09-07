@@ -269,12 +269,13 @@ class LLMGateway:
         for field_name, field_info in schema_class.model_fields.items():
             annotation = str(field_info.annotation)
 
-            # ZMIANA: Precyzyjne sprawdzanie, czy to lista stringów, a nie jakakolwiek lista
             is_list_of_strs = "List[str]" in annotation or "list[str]" in annotation
             is_str = "str" in annotation and not is_list_of_strs
+            is_int = "int" in annotation
+            is_float = "float" in annotation
+            is_bool = "bool" in annotation
 
-            # Pomijamy złożone modele Pydantic (jak List[SeverityItem])
-            if not (is_list_of_strs or is_str):
+            if not (is_list_of_strs or is_str or is_int or is_float or is_bool):
                 continue
 
             match = re.search(f"<{field_name}>(.*?)</{field_name}>", raw_text, re.DOTALL | re.IGNORECASE)
@@ -286,10 +287,32 @@ class LLMGateway:
                         for line in content.split('\n')
                         if re.sub(r"^\s*[-*•]\s+", "", line).strip()
                     ]
+                elif is_int:
+                    try:
+                        parsed_data[field_name] = int(content)
+                    except:
+                        parsed_data[field_name] = 0
+                elif is_float:
+                    try:
+                        parsed_data[field_name] = float(content)
+                    except:
+                        parsed_data[field_name] = 0.0
+                elif is_bool:
+                    parsed_data[field_name] = content.lower() in ("true", "1", "tak", "yes")
                 else:
                     parsed_data[field_name] = content
             else:
-                parsed_data[field_name] = [] if is_list_of_strs else ""
+                if is_list_of_strs:
+                    parsed_data[field_name] = []
+                elif is_int:
+                    parsed_data[field_name] = 0
+                elif is_float:
+                    parsed_data[field_name] = 0.0
+                elif is_bool:
+                    parsed_data[field_name] = False
+                else:
+                    parsed_data[field_name] = ""
+
         return parsed_data
 
     @staticmethod
