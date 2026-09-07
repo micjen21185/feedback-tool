@@ -101,7 +101,10 @@ class Config:
         "ollama/qwen2.5:14b",
         "ollama/deepseek-r1:8b",
         "ollama/deepseek-r1:14b",
-        "ollama/gemma3:12b"
+        "ollama/gemma3:12b",
+        "ollama/gemma2:27b",
+        "ollama/qwen2.5:32b",
+        "ollama/command-r:35b"
     ]
 
     COMMERCIAL_MODELS = [
