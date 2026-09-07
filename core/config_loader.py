@@ -110,7 +110,7 @@ class Config:
     COMMERCIAL_MODELS = [
         "gpt-4o",
         "gpt-4o-mini",
-        "claude-3-5-sonnet-20240620",
+        "anthropic/claude-3-5-sonnet-20240620",
         "gemini/gemini-3.1-pro-preview",
         "gemini/gemini-3.6-flash"
     ]
