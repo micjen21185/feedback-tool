@@ -111,7 +111,7 @@ class Config:
         "gpt-4o",
         "gpt-4o-mini",
         "claude-3-5-sonnet-20240620",
-        "gemini/gemini-3.1-pro",
+        "gemini/gemini-3.1-pro-preview",
         "gemini/gemini-3.6-flash"
     ]
 
