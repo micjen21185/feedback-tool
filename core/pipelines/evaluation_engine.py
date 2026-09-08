@@ -1,4 +1,5 @@
 import itertools
+import math
 import re
 from typing import Dict, Tuple, List
 
@@ -46,6 +47,55 @@ class EvaluationEngine:
             f"PRZESŁANIE: {fb.overall_message}",
         ]
         return "\n".join(parts)
+
+    @staticmethod
+    def _calculate_language_tax(report: FinalReport, total_words: int) -> float:
+        """
+        Oblicza wskaźnik Tokens-Per-Word (TPW) dla fazy Map (wejście).
+        Udowadnia 'Podatek Językowy' dla polskiego tekstu w zachodnich modelach.
+        """
+        if not total_words or total_words == 0:
+            return 0.0
+
+        map_tokens_in = sum(
+            p.tokens_in for p in report.telemetry.phase_details
+            if "Map" in p.agent_role or "Zero-Shot" in p.agent_role
+        )
+        return round(map_tokens_in / total_words, 2)
+
+    @staticmethod
+    def _split_phase_telemetry(report: FinalReport) -> dict:
+        """
+        Rozbija koszty i tokeny na poszczególne ramy architektoniczne (Map vs Reduce).
+        """
+        details = report.telemetry.phase_details
+
+        map_factual_cost = sum(p.cost_usd for p in details if "Factual" in p.agent_role)
+        map_linguistic_cost = sum(p.cost_usd for p in details if "Linguistic" in p.agent_role)
+        gatekeeper_cost = sum(p.cost_usd for p in details if "Gatekeeper" in p.agent_role)
+        reduce_cost = sum(p.cost_usd for p in details if "Hegemon" in p.agent_role or "Reduce" in p.agent_role)
+
+        return {
+            "map_factual_usd": round(map_factual_cost, 5),
+            "map_linguistic_usd": round(map_linguistic_cost, 5),
+            "gatekeeper_usd": round(gatekeeper_cost, 5),
+            "reduce_usd": round(reduce_cost, 5),
+            "map_total_usd": round(map_factual_cost + map_linguistic_cost + gatekeeper_cost, 5)
+        }
+
+    @staticmethod
+    def _calculate_alignment_error(report: FinalReport, exp_factual: float, exp_linguistic: float) -> float:
+        """
+        Wylicza MSE (Mean Squared Error) między oceną Hegemona a Twoim Złotym Wzorcem.
+        """
+        if not report.scorecard or report.scorecard.factual_score is None:
+            return 0.0
+
+        factual_diff = report.scorecard.factual_score - exp_factual
+        ling_diff = report.scorecard.linguistic_score - exp_linguistic
+
+        mse = (math.pow(factual_diff, 2) + math.pow(ling_diff, 2)) / 2
+        return round(mse, 2)
 
     @staticmethod
     def build_grounding_excerpt(transcript: str, total_chars: int = None, regions: int = None) -> str:
@@ -243,13 +293,10 @@ Oceniasz JAKOŚĆ poniższego raportu (nie samo wystąpienie).
 {self._report_text(report)}
 
 ZASADY OCENY:
-- correctness/groundedness: sprawdź, czy twierdzenia raportu MAJĄ POKRYCIE w powyższych fragmentach
-  transkrypcji (z różnych części wystąpienia). Karz za twierdzenia bez pokrycia (halucynacje).
-- SONDY CZASOWE: dla każdego znacznika [MM:SS] w raporcie masz fragment transkrypcji z tego miejsca.
-  Sprawdź, czy obserwacja raportu przy tym znaczniku faktycznie znajduje potwierdzenie w tym fragmencie.
-  Jeśli raport twierdzi coś, czego nie ma w odpowiadającym fragmencie — obniż groundedness/correctness.
-- Zwróć uwagę, czy raport pokrywa ŚRODEK i KONIEC wystąpienia, a nie tylko początek.
-- Jeśli podano USTALENIA PIPELINE, sprawdź czy raport je odzwierciedla (nie pomija kluczowych punktów).
+1. Groundedness (Ugruntowanie): Sprawdź, czy twierdzenia raportu mają DOKŁADNE POKRYCIE w powyższych fragmentach transkrypcji. Surowo karz za halucynacje.
+2. Positional Recall (Sondy Czasowe): Masz dostarczone fragmenty transkrypcji z miejsc, które zacytował raport [MM:SS]. Sprawdź, czy raport faktycznie cytuje błędy z całego nagrania (środek i koniec). Jeśli skupia się tylko na początku - drastycznie obniż ocenę. Jeśli wnioski w sondach są zmyślone - tnij punkty.
+3. Tool Adherence (Lenistwo): Jeśli raport dotyczy scenariusza z RAG/WEB, sprawdź czy podaje źródła i kategorycznie odrzuca kłamstwa historyczne. Jeśli model "zgaduje" lub asekuruje się statusem UNVERIFIED dla powszechnych faktów - karz za lenistwo narzędziowe.
+4. Vague Praise vs Actionability: Policz konkretne rady. Jeśli raport "leje wodę" (np. "musisz pracować nad dynamiką"), obniż Actionability do minimum. Wymagaj bezwzględnego wskazywania konkretnych błędów z [MM:SS].
 
 Oceń raport w 5 wymiarach 0-10 (actionability, specificity, correctness, tone, groundedness)
 i podaj krótkie uzasadnienie. Zwróć wynik zgodnie ze schematem."""
@@ -286,7 +333,10 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
 
     async def evaluate(self, transcript_excerpt: str,
                        reports: Dict[str, FinalReport],
-                       duration_sec: float = 0.0) -> EvaluationReport:
+                       duration_sec: float = 0.0,
+                       total_words: int = 0,
+                       expected_factual: float = 70.0,
+                       expected_linguistic: float = 30.0) -> EvaluationReport:
         result = EvaluationReport()
 
         # Idea 1: build a deterministic multi-region excerpt so the judge sees start/middle/end,
@@ -305,10 +355,17 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
                 rubric = await self._judge_absolute(grounded_excerpt, name, report, probes=probes)
             except Exception as e:
                 rubric = JudgeRubric(justification=f"[Sędzia zawiódł: {e}]")
+
             total = rubric.actionability + rubric.specificity + rubric.correctness + rubric.tone + rubric.groundedness
             in_density, out_density = self._density(report)
             pos_recall = self.positional_recall(report, duration_sec)
             red_fidelity = self.reduce_fidelity(report, duration_sec)
+
+            # --- ZMIANY: Nowe metryki telemetryczne (TPW, koszty faz, błąd względem Ground Truth)
+            phase_costs = self._split_phase_telemetry(report)
+            tpw = self._calculate_language_tax(report, total_words)
+            alignment_error = self._calculate_alignment_error(report, expected_factual, expected_linguistic)
+
             # Option 2: record exactly what the judge saw, so its groundedness score is auditable.
             ground_truth = self._ground_truth_findings(report)
             evidence = (
@@ -316,10 +373,17 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
                 f"=== USTALENIA PIPELINE ===\n{ground_truth or '(brak)'}\n\n"
                 f"=== SONDY CZASOWE ===\n{probes or '(brak — raport nie cytował znaczników [MM:SS])'}"
             )
+
+            # Dodajemy nowe parametry (wymaga aktualizacji ScenarioEvaluation w schemas.py)
+            # Uwaga: używamy dictionary unpacking/dynamic set jeśli dataclass na to nie pozwala
+            # ale z Pydantic możemy przypisać po prostu nowe kwargs.
             result.per_scenario.append(ScenarioEvaluation(
                 scenario_name=name,
                 rubric=rubric,
                 rubric_total=total,
+                alignment_error_mse=alignment_error,  # NOWE
+                tokens_per_word=tpw,  # NOWE
+                phase_costs=phase_costs,  # NOWE
                 total_tokens_in=report.telemetry.total_tokens_in,
                 total_tokens_out=report.telemetry.total_tokens_out,
                 total_cost_usd=report.telemetry.total_cost_usd,
