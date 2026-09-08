@@ -104,8 +104,6 @@ def process_uploaded_zip(uploaded_file):
 
 
 def _load_maps_from_disk() -> int:
-    """Load previously-saved MapResult JSON files from MAPS_DIR into session state.
-    Recovers expensive MAP phases after a restart. Returns how many NEW maps were added."""
     import os
     from models.schemas import MapResult
     existing_ids = {m.map_id for m in st.session_state.map_results}
@@ -129,9 +127,6 @@ def _load_maps_from_disk() -> int:
 
 
 def _load_runs_from_disk() -> int:
-    """Load previously-saved RunResult JSON files from RUNS_DIR into session state.
-    Recovers a crashed batch's completed scenarios. Returns how many NEW runs were added
-    (skips run_ids already present)."""
     import os
     from models.schemas import RunResult
     existing_ids = {r.run_id for r in st.session_state.runs}
@@ -150,13 +145,11 @@ def _load_runs_from_disk() -> int:
                 existing_ids.add(r.run_id)
                 added += 1
         except Exception:
-            continue  # skip corrupt/partial files
+            continue
     return added
 
 
 def _judge_config_controls(key_prefix: str) -> dict:
-    """Render judge-grounding controls in an expander; return kwargs for EvaluationEngine.
-    Shared by the batch section and the manual comparison section."""
     with st.expander("⚙️ Konfiguracja sędziego (osadzenie / groundedness)"):
         excerpt_chars = st.slider(
             "Rozmiar fragmentu transkrypcji dla sędziego (znaki)", 0, 30000,
@@ -191,7 +184,6 @@ def _judge_config_controls(key_prefix: str) -> dict:
 
 
 def _batch_markdown(export) -> str:
-    """Human-readable Markdown summary of a batch: header + per-run scores/cost + judge table."""
     lines = [
         f"# Raport wsadowy — {export.source_label}",
         f"Utworzono: {export.created_at}",
@@ -208,18 +200,6 @@ def _batch_markdown(export) -> str:
             f"Merytoryczny=`{r.models.factual_model}`, Językowy=`{r.models.linguistic_model}` | "
             f"Ocena: {overall} | Koszt: ${cost:.4f} | Tokeny: {toks}"
         )
-    if export.evaluation and export.evaluation.per_scenario:
-        lines += ["", "## Ocena sędziego (jakość vs. koszt)", "",
-                  "| Scenariusz | Jakość/50 | Błąd MSE | Koszt $ | Osadzenie | Lost-in-middle |",
-                  "|---|---|---|---|---|---|"]
-        for se in export.evaluation.per_scenario:
-            mse = getattr(se, "alignment_error_mse", 0.0)
-            lines.append(
-                f"| {se.scenario_name} | {se.rubric_total} | {mse} | "
-                f"{round(se.total_cost_usd, 5)} | {se.rubric.groundedness}/10 | {'TAK' if se.lost_in_middle_flag else 'nie'} |"
-            )
-        if export.evaluation.summary:
-            lines += ["", export.evaluation.summary]
     return "\n".join(lines)
 
 
@@ -228,8 +208,6 @@ def _fmt_score(value) -> str:
 
 
 def _reports_from_uploaded_json(raw: str, filename: str) -> list:
-    """Parse an uploaded JSON into a list of (label, FinalReport). Accepts three shapes:
-    a bare FinalReport, a RunResult (has .report), or a BatchExport (has .runs[].report)."""
     from models.schemas import FinalReport, RunResult, BatchExport
     out = []
     try:
@@ -253,8 +231,6 @@ def _reports_from_uploaded_json(raw: str, filename: str) -> list:
 
 
 def _report_markdown(report, title: str = "Raport") -> str:
-    """Full, thesis-injectable Markdown for a SINGLE report — scores, analysis, the mentoring
-    essay, strengths/areas/tips, unverified claims, and a compact telemetry line."""
     a, fb, sc, tel = report.analysis, report.feedback, report.scorecard, report.telemetry
     lines = [f"# {title}", ""]
     if sc is not None:
@@ -302,7 +278,6 @@ def _report_markdown(report, title: str = "Raport") -> str:
 
 
 def render_report(report, key: str = "report", title: str = "Raport z analizy"):
-    """Render a FinalReport. Called from the persistent view so it survives Streamlit reruns."""
     _dc1, _dc2 = st.columns(2)
     with _dc1:
         st.download_button(
@@ -483,7 +458,6 @@ linguistic_model = st.sidebar.selectbox(
 )
 
 st.subheader("📂 Krok 1: Wczytaj dane wejściowe")
-
 uploaded_zip = st.file_uploader("1. Załaduj wygenerowaną paczkę ZIP z danymi (Transkrypcja + Slajdy)", type="zip")
 
 if uploaded_zip is not None:
@@ -742,7 +716,8 @@ else:
                 reports = {r.display_label(): r.report for r in new_runs}
                 duration = max((r.duration_sec for r in new_runs), default=0.0)
                 excerpt = st.session_state.zip_data.get("raw_text", "")
-                batch_eval = asyncio.run(engine.evaluate(
+
+                batch_eval, batch_extra = asyncio.run(engine.evaluate(
                     transcript_excerpt=excerpt,
                     reports=reports,
                     duration_sec=duration,
@@ -929,7 +904,7 @@ else:
     manual_judge_cfg = _judge_config_controls("manual")
 
     st.subheader("🎯 Złoty Wzorzec (Ground Truth)")
-    st.caption("Ustaw spodziewane oceny dla tego nagrania. Sędzia wyliczy odchylenie (Błąd MSE) testowanych modeli.")
+    st.caption("Ustaw spodziewane oceny dla tego nagrania. Sędzia wyliczy odchylenie (RMSE) testowanych modeli.")
     col_gt1, col_gt2 = st.columns(2)
     with col_gt1:
         exp_factual = st.slider("Oczekiwana Merytoryka", 0.0, 100.0, 70.0, 0.5)
@@ -937,10 +912,11 @@ else:
         exp_linguistic = st.slider("Oczekiwany Język", 0.0, 100.0, 30.0, 0.5)
 
     selected = st.multiselect(
-        "Wybierz scenariusze do porównania (2+ dla preferencji parami):",
+        "Wybierz scenariusze do porównania:",
         options=list(cached.keys()),
         default=list(cached.keys())
     )
+
     if st.button("🚀 Wygeneruj Ranking (LLM-as-a-Judge)") and selected:
         fingerprints = {cached[name].get("input_fingerprint") for name in selected}
         if len(fingerprints) > 1:
@@ -959,7 +935,8 @@ else:
             eval_obs = ObservabilityManager()
             eval_gateway = LLMGateway(eval_obs)
             engine = EvaluationEngine(eval_gateway, judge_model, **manual_judge_cfg)
-            eval_report = asyncio.run(engine.evaluate(
+
+            eval_report, extra_metrics = asyncio.run(engine.evaluate(
                 transcript_excerpt=excerpt,
                 reports=reports,
                 duration_sec=duration,
@@ -968,43 +945,54 @@ else:
                 expected_linguistic=exp_linguistic
             ))
 
-        st.subheader("🥇 Tabela Wyników (Posortowana wg Jakości i Błędu)")
+        h2h_wins = {name: 0 for name in selected}
+        if eval_report.pairwise:
+            for pref in eval_report.pairwise:
+                if pref.winner in h2h_wins:
+                    h2h_wins[pref.winner] += 1
+
+        st.subheader("🥇 Tabela Wyników (Posortowana wg Wygranych i Jakości)")
         rows = []
         for se in eval_report.per_scenario:
-            pc = getattr(se, "phase_costs", {})
-            mse = getattr(se, "alignment_error_mse", 0.0)
-            tpw = getattr(se, "tokens_per_word", 0.0)
+            ext = extra_metrics.get(se.scenario_name, {})
+            costs = ext.get("costs", {})
+            wins = h2h_wins.get(se.scenario_name, 0)
 
             rows.append({
                 "Architektura / Model": se.scenario_name,
-                "🏆 Sędzia (Jakość)": se.rubric_total,
-                "🎯 Błąd MSE (Odchylenie)": mse,
-                "💰 Koszt Całkowity": se.total_cost_usd,
-                "📉 Koszt fazy MAP": pc.get("map_total_usd", 0.0),
-                "📈 Koszt Hegemona": pc.get("reduce_usd", 0.0),
-                "🔤 TPW (Podatek Językowy)": tpw,
-                "🔍 Konkretność rad": se.rubric.actionability,
+                "⚔️ Wygrane H2H": wins,
+                "🏆 Jakość (0-50)": se.rubric_total,
+                "🎯 Odchylenie (RMSE)": ext.get("rmse", 0.0),
+                "🔤 TPW (Narzut)": ext.get("tpw", 0.0),
+                "📦 Gęstość IN (zn/tok)": ext.get("density_in", 0.0),
+                "📦 Gęstość OUT (zn/tok)": ext.get("density_out", 0.0),
+                "📉 Koszt MAP ($)": costs.get("map_total_usd", 0.0),
+                "📈 Koszt Hegemona ($)": costs.get("reduce_usd", 0.0),
                 "Osadzenie w faktach": se.rubric.groundedness,
-                "⚠️ Lost in Middle": "TAK" if se.lost_in_middle_flag else "NIE",
+                "Konkretność rad": se.rubric.actionability,
+                "⚠️ Zagubienie w środku": ext.get("lost_in_middle", "NIE"),
             })
 
         df = pd.DataFrame(rows)
         if not df.empty:
-            df = df.sort_values(by=["🏆 Sędzia (Jakość)", "🎯 Błąd MSE (Odchylenie)"], ascending=[False, True])
+            df = df.sort_values(by=["⚔️ Wygrane H2H", "🏆 Jakość (0-50)", "🎯 Odchylenie (RMSE)"],
+                                ascending=[False, False, True])
 
             st.dataframe(
                 df,
                 hide_index=True,
                 use_container_width=True,
                 column_config={
-                    "🏆 Sędzia (Jakość)": st.column_config.NumberColumn(format="%d/50"),
-                    "🎯 Błąd MSE (Odchylenie)": st.column_config.NumberColumn(
-                        help="Im bliżej zera, tym model bliższy ocenie człowieka"),
-                    "💰 Koszt Całkowity": st.column_config.NumberColumn(format="$%.5f"),
-                    "📉 Koszt fazy MAP": st.column_config.NumberColumn(format="$%.5f"),
-                    "📈 Koszt Hegemona": st.column_config.NumberColumn(format="$%.5f"),
-                    "🔤 TPW (Podatek Językowy)": st.column_config.NumberColumn(
-                        help="Ilość tokenów wejściowych zużywanych na jedno polskie słowo. Wyższe = droższe przetwarzanie polskiego tekstu.")
+                    "🏆 Jakość (0-50)": st.column_config.NumberColumn(format="%d/50"),
+                    "🎯 Odchylenie (RMSE)": st.column_config.NumberColumn(
+                        help="Im mniejszy, tym model bliższy ocenie człowieka"),
+                    "📉 Koszt MAP ($)": st.column_config.NumberColumn(format="$%.5f"),
+                    "📈 Koszt Hegemona ($)": st.column_config.NumberColumn(format="$%.5f"),
+                    "🔤 TPW (Narzut)": st.column_config.NumberColumn(
+                        help="Ilość tokenów wejściowych zużywanych na jedno polskie słowo."),
+                    "📦 Gęstość IN (zn/tok)": st.column_config.NumberColumn(
+                        help="Ilość znaków na 1 token (wejście). Wyżej = lepiej/taniej zoptymalizowany model językowy."),
+                    "📦 Gęstość OUT (zn/tok)": st.column_config.NumberColumn(help="Ilość znaków na 1 token (wyjście).")
                 }
             )
 
@@ -1013,26 +1001,25 @@ else:
         if len(per) >= 2:
             st.subheader("📐 Porównanie do bazy (Δ)")
             st.caption(
-                "Wybierz scenariusz bazowy (np. Monolith Naked). Pozostałe pokazane jako RÓŻNICA względem niego "
-                "— dodatnia jakość/osadzenie = lepiej, dodatni koszt = drożej."
-            )
+                "Wybierz scenariusz bazowy. Pozostałe pokazane jako RÓŻNICA względem niego (dodatnia jakość = lepiej).")
             names = [se.scenario_name for se in per]
             base_name = st.selectbox("Scenariusz bazowy:", options=names, index=0, key="ab_baseline")
             base = next(se for se in per if se.scenario_name == base_name)
+            base_ext = extra_metrics.get(base_name, {})
+
             delta_rows = []
             for se in per:
                 if se.scenario_name == base_name:
                     continue
+                ext = extra_metrics.get(se.scenario_name, {})
                 delta_rows.append({
                     "Scenariusz": se.scenario_name,
                     "Δ Jakość (0-50)": round(se.rubric_total - base.rubric_total, 1),
-                    "Δ Błąd MSE": round(
-                        getattr(se, "alignment_error_mse", 0.0) - getattr(base, "alignment_error_mse", 0.0), 2),
-                    "Δ Osadzenie w faktach": se.rubric.groundedness - base.rubric.groundedness,
-                    "Δ Trafność": se.rubric.correctness - base.rubric.correctness,
+                    "Δ Odchylenie (RMSE)": round(ext.get("rmse", 0.0) - base_ext.get("rmse", 0.0), 2),
+                    "Δ TPW": round(ext.get("tpw", 0.0) - base_ext.get("tpw", 0.0), 2),
                     "Δ Koszt ($)": round(se.total_cost_usd - base.total_cost_usd, 5),
-                    "Lost-in-middle (baza→ten)": f"{'TAK' if base.lost_in_middle_flag else 'nie'} → "
-                                                 f"{'TAK' if se.lost_in_middle_flag else 'nie'}",
+                    "Δ Osadzenie": se.rubric.groundedness - base.rubric.groundedness,
+                    "Lost-in-middle": f"{base_ext.get('lost_in_middle', 'Brak danych')} → {ext.get('lost_in_middle', 'Brak danych')}",
                 })
             if delta_rows:
                 st.dataframe(pd.DataFrame(delta_rows), hide_index=True, use_container_width=True)
@@ -1041,8 +1028,8 @@ else:
         st.caption(
             "Sprawdź, DLACZEGO sędzia dał daną ocenę osadzenia — jego uzasadnienie oraz materiał, który widział.")
         for se in per:
-            with st.expander(f"{se.scenario_name} — groundedness {se.rubric.groundedness}/10, "
-                             f"correctness {se.rubric.correctness}/10"):
+            with st.expander(f"{se.scenario_name} — Osadzenie {se.rubric.groundedness}/10, "
+                             f"Trafność {se.rubric.correctness}/10"):
                 if se.rubric.justification:
                     st.markdown(f"**Uzasadnienie sędziego:** {se.rubric.justification}")
                 if se.judge_evidence:
@@ -1051,13 +1038,8 @@ else:
                 else:
                     st.info("Brak zapisanego materiału dowodowego.")
 
-        if eval_report.pairwise:
-            st.subheader("⚔️ Preferencje parami")
-            for pref in eval_report.pairwise:
-                st.markdown(f"- **Zwycięzca: {pref.winner}** — {pref.reason}")
-
         st.caption(
-            f"Tokeny sędziego: {eval_report.judge_tokens_in + eval_report.judge_tokens_out}. {eval_report.summary}"
+            f"Tokeny zużyte przez sędziego do oceny: {eval_report.judge_tokens_in + eval_report.judge_tokens_out}."
         )
         eval_gateway.reset_session_telemetry()
 
@@ -1115,10 +1097,11 @@ if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_upload
                 i += 1
             reports[uniq] = rep
         st.info(f"Wczytano {len(reports)} raportów: {', '.join(reports.keys())}")
+
         with st.spinner("Sędzia ocenia wgrane raporty..."):
             up_gateway = LLMGateway(ObservabilityManager())
             up_engine = EvaluationEngine(up_gateway, up_judge_model, **up_judge_cfg)
-            up_eval = asyncio.run(up_engine.evaluate(
+            up_eval, up_extra_metrics = asyncio.run(up_engine.evaluate(
                 transcript_excerpt=up_excerpt,
                 reports=reports,
                 duration_sec=0.0,
@@ -1128,30 +1111,37 @@ if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_upload
             ))
             up_gateway.reset_session_telemetry()
 
+        up_h2h_wins = {name: 0 for name in reports.keys()}
+        if up_eval.pairwise:
+            for pref in up_eval.pairwise:
+                if pref.winner in up_h2h_wins:
+                    up_h2h_wins[pref.winner] += 1
+
         rows = []
         for se in up_eval.per_scenario:
-            pc = getattr(se, "phase_costs", {})
+            ext = up_extra_metrics.get(se.scenario_name, {})
+            costs = ext.get("costs", {})
+
             rows.append({
                 "Raport": se.scenario_name,
+                "⚔️ Wygrane H2H": up_h2h_wins.get(se.scenario_name, 0),
                 "Jakość (0-50)": se.rubric_total,
-                "Błąd MSE": getattr(se, "alignment_error_mse", 0.0),
-                "TPW (Podatek)": getattr(se, "tokens_per_word", 0.0),
-                "Koszt MAP ($)": pc.get("map_total_usd", 0.0),
-                "Koszt Hegemona ($)": pc.get("reduce_usd", 0.0),
-                "Osadzenie w faktach": se.rubric.groundedness,
-                "Koszt / pkt jakości ($)": round(se.total_cost_usd / se.rubric_total, 6) if se.rubric_total else None,
-                "Zagubienie w środku": "⚠️ TAK" if se.lost_in_middle_flag else "nie",
+                "Odchylenie (RMSE)": ext.get("rmse", 0.0),
+                "TPW (Podatek)": ext.get("tpw", 0.0),
+                "Gęstość IN (zn/tok)": ext.get("density_in", 0.0),
+                "Gęstość OUT (zn/tok)": ext.get("density_out", 0.0),
+                "Koszt MAP ($)": costs.get("map_total_usd", 0.0),
+                "Koszt Hegemona ($)": costs.get("reduce_usd", 0.0),
+                "Osadzenie": se.rubric.groundedness,
+                "Zagubienie w środku": ext.get("lost_in_middle", "NIE"),
             })
 
         df_up = pd.DataFrame(rows)
         if not df_up.empty:
-            df_up = df_up.sort_values(by=["Jakość (0-50)", "Błąd MSE"], ascending=[False, True])
+            df_up = df_up.sort_values(by=["⚔️ Wygrane H2H", "Jakość (0-50)", "Odchylenie (RMSE)"],
+                                      ascending=[False, False, True])
             st.dataframe(df_up, hide_index=True, use_container_width=True)
 
-        if up_eval.pairwise:
-            st.subheader("⚔️ Preferencje parami")
-            for pref in up_eval.pairwise:
-                st.markdown(f"- **Zwycięzca: {pref.winner}** — {pref.reason}")
         st.caption(
             f"Tokeny sędziego: {up_eval.judge_tokens_in + up_eval.judge_tokens_out}. {up_eval.summary}"
         )
