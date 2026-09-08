@@ -31,30 +31,45 @@ if 'zip_data' not in st.session_state:
         "chunks": []
     }
 
-# Cache of per-scenario FinalReports (kept across runs) so scenarios can be compared/evaluated.
 if 'evaluated_reports' not in st.session_state:
     st.session_state.evaluated_reports = {}
 
-# Which cached scenario's report to show by default in the persistent report view.
 if 'active_report_scenario' not in st.session_state:
     st.session_state.active_report_scenario = None
 
-# Multi-run store (composite-keyed): every RunResult, so the SAME scenario with DIFFERENT models
-# is kept separately for comparison/export. Separate from the single-run 'evaluated_reports' view.
 if 'runs' not in st.session_state:
     st.session_state.runs = []
 
-# Cached MapResults (swarm map+combine output) — reusable to run the reduce with different
-# Hegemon models on identical evidence without re-running the expensive map phase.
 if 'map_results' not in st.session_state:
     st.session_state.map_results = []
+
+
+def read_golden_set(file_obj) -> str:
+    if file_obj is None:
+        return ""
+    name = file_obj.name.lower()
+    if name.endswith(".json"):
+        try:
+            return json.dumps(json.loads(file_obj.getvalue().decode('utf-8')), indent=2, ensure_ascii=False)
+        except:
+            return file_obj.getvalue().decode('utf-8', errors='ignore')
+    elif name.endswith(".pdf"):
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(stream=file_obj.getvalue(), filetype="pdf")
+            text = "\n".join(page.get_text() for page in doc)
+            return text
+        except Exception as e:
+            st.warning(f"Błąd odczytu PDF (upewnij się że masz zainstalowane pymupdf): {e}")
+            return ""
+    else:
+        return file_obj.getvalue().decode('utf-8', errors='ignore')
 
 
 def process_uploaded_zip(uploaded_file):
     try:
         with zipfile.ZipFile(uploaded_file, 'r') as z:
             file_list = z.namelist()
-
             metadata_path = next((f for f in file_list if f.endswith('metadata.json')), None)
             raw_text_path = next((f for f in file_list if f.endswith('full_raw_text.txt')), None)
             formatted_text_path = next((f for f in file_list if f.endswith('full_formatted_text.txt')), None)
@@ -75,10 +90,8 @@ def process_uploaded_zip(uploaded_file):
             for f in file_list:
                 if f.endswith('.json'):
                     file_name = f.split('/')[-1] if '/' in f else f
-
                     if 'chunk_' in file_name:
-                        chunk_json = json.loads(z.read(f).decode('utf-8'))
-                        chunks_data.append(chunk_json)
+                        chunks_data.append(json.loads(z.read(f).decode('utf-8')))
                     elif 'slide_summary' in file_name:
                         folder_name = f.split('/')[0] if '/' in f else 'global'
                         slide_summaries[folder_name] = json.loads(z.read(f).decode('utf-8'))
@@ -94,9 +107,7 @@ def process_uploaded_zip(uploaded_file):
                 "chunks": chunks_data,
                 "slide_summaries": slide_summaries
             }
-
-            st.success(
-                f"✅ Wczytano: Metadane, Teksty, Timeline, {len(chunks_data)} chunków i {len(slide_summaries)} podsumowań slajdów.")
+            st.success(f"✅ Wczytano paczkę: {len(chunks_data)} chunków.")
             return True
     except Exception as e:
         st.error(f"❌ Błąd przetwarzania paczki ZIP: {e}")
@@ -109,11 +120,9 @@ def _load_maps_from_disk() -> int:
     existing_ids = {m.map_id for m in st.session_state.map_results}
     added = 0
     directory = Config.MAPS_DIR
-    if not os.path.isdir(directory):
-        return 0
+    if not os.path.isdir(directory): return 0
     for fname in sorted(os.listdir(directory)):
-        if not fname.endswith(".json"):
-            continue
+        if not fname.endswith(".json"): continue
         try:
             with open(os.path.join(directory, fname), encoding="utf-8") as fh:
                 m = MapResult.model_validate_json(fh.read())
@@ -121,7 +130,7 @@ def _load_maps_from_disk() -> int:
                 st.session_state.map_results.append(m)
                 existing_ids.add(m.map_id)
                 added += 1
-        except Exception:
+        except:
             continue
     return added
 
@@ -132,11 +141,9 @@ def _load_runs_from_disk() -> int:
     existing_ids = {r.run_id for r in st.session_state.runs}
     added = 0
     directory = Config.RUNS_DIR
-    if not os.path.isdir(directory):
-        return 0
+    if not os.path.isdir(directory): return 0
     for fname in sorted(os.listdir(directory)):
-        if not fname.endswith(".json"):
-            continue
+        if not fname.endswith(".json"): continue
         try:
             with open(os.path.join(directory, fname), encoding="utf-8") as fh:
                 r = RunResult.model_validate_json(fh.read())
@@ -144,52 +151,31 @@ def _load_runs_from_disk() -> int:
                 st.session_state.runs.append(r)
                 existing_ids.add(r.run_id)
                 added += 1
-        except Exception:
+        except:
             continue
     return added
 
 
 def _judge_config_controls(key_prefix: str) -> dict:
     with st.expander("⚙️ Konfiguracja sędziego (osadzenie / groundedness)"):
-        excerpt_chars = st.slider(
-            "Rozmiar fragmentu transkrypcji dla sędziego (znaki)", 0, 30000,
-            Config.JUDGE_EXCERPT_CHARS, step=1000, key=f"{key_prefix}_excerpt_chars",
-            help="0 = wyłącz wieloregionowy fragment. Więcej = lepsze osadzenie, ale drożej."
-        )
-        excerpt_regions = st.slider(
-            "Liczba regionów (początek/środek/koniec…)", 1, 5, Config.JUDGE_EXCERPT_REGIONS,
-            key=f"{key_prefix}_excerpt_regions"
-        )
-        probe_timestamps = st.slider(
-            "Liczba sond czasowych [MM:SS] do sprawdzenia", 0, 20, Config.JUDGE_PROBE_TIMESTAMPS,
-            key=f"{key_prefix}_probe_ts",
-            help="0 = wyłącz sondowanie przy znacznikach czasu."
-        )
-        probe_window = st.slider(
-            "Okno sondy czasowej (znaki wokół znacznika)", 100, 2000, Config.JUDGE_PROBE_WINDOW_CHARS,
-            step=100, key=f"{key_prefix}_probe_win"
-        )
-        focus = st.text_area(
-            "Szczególny nacisk dla sędziego (opcjonalnie)", value="",
-            key=f"{key_prefix}_focus",
-            help="Np. 'Zwróć szczególną uwagę na poprawność nazwisk i dat' albo 'Oceń surowo ton'."
-        )
+        excerpt_chars = st.slider("Rozmiar fragmentu transkrypcji (znaki)", 0, 30000, Config.JUDGE_EXCERPT_CHARS,
+                                  step=1000, key=f"{key_prefix}_excerpt_chars")
+        excerpt_regions = st.slider("Liczba regionów", 1, 5, Config.JUDGE_EXCERPT_REGIONS,
+                                    key=f"{key_prefix}_excerpt_regions")
+        probe_timestamps = st.slider("Sondy czasowe [MM:SS]", 0, 20, Config.JUDGE_PROBE_TIMESTAMPS,
+                                     key=f"{key_prefix}_probe_ts")
+        probe_window = st.slider("Okno sondy (znaki)", 100, 2000, Config.JUDGE_PROBE_WINDOW_CHARS, step=100,
+                                 key=f"{key_prefix}_probe_win")
+        focus = st.text_area("Szczególny nacisk dla sędziego", value="", key=f"{key_prefix}_focus")
     return {
-        "excerpt_chars": excerpt_chars,
-        "excerpt_regions": excerpt_regions,
-        "probe_timestamps": probe_timestamps,
-        "probe_window_chars": probe_window,
+        "excerpt_chars": excerpt_chars, "excerpt_regions": excerpt_regions,
+        "probe_timestamps": probe_timestamps, "probe_window_chars": probe_window,
         "focus_instruction": focus,
     }
 
 
 def _batch_markdown(export) -> str:
-    lines = [
-        f"# Raport wsadowy — {export.source_label}",
-        f"Utworzono: {export.created_at}",
-        "",
-        "## Uruchomienia",
-    ]
+    lines = [f"# Raport wsadowy — {export.source_label}", f"Utworzono: {export.created_at}", "", "## Uruchomienia"]
     for r in export.runs:
         sc = r.report.scorecard
         overall = f"{sc.overall_score}/100" if sc else "—"
@@ -213,20 +199,19 @@ def _reports_from_uploaded_json(raw: str, filename: str) -> list:
     try:
         be = BatchExport.model_validate_json(raw)
         if be.runs:
-            for rr in be.runs:
-                out.append((f"{rr.scenario_name} · {rr.models.hegemon_model.split('/')[-1]}", rr.report))
+            for rr in be.runs: out.append((f"{rr.scenario_name} · {rr.models.hegemon_model.split('/')[-1]}", rr.report))
             return out
-    except Exception:
+    except:
         pass
     try:
         rr = RunResult.model_validate_json(raw)
         return [(f"{rr.scenario_name} · {rr.models.hegemon_model.split('/')[-1]}", rr.report)]
-    except Exception:
+    except:
         pass
     try:
         fr = FinalReport.model_validate_json(raw)
         return [(filename.rsplit(".", 1)[0], fr)]
-    except Exception:
+    except:
         return []
 
 
@@ -235,246 +220,99 @@ def _report_markdown(report, title: str = "Raport") -> str:
     lines = [f"# {title}", ""]
     if sc is not None:
         parts = [f"**Ocena łączna:** {sc.overall_score}/100 — {sc.readiness_verdict}"]
-        if sc.factual_score is not None:
-            parts.append(f"Merytoryka: {sc.factual_score}/100")
-        if sc.linguistic_score is not None:
-            parts.append(f"Język: {sc.linguistic_score}/100")
-        if sc.slide_coverage_score is not None:
-            parts.append(f"Pokrycie slajdów: {sc.slide_coverage_score}/100")
+        if sc.factual_score is not None: parts.append(f"Merytoryka: {sc.factual_score}/100")
+        if sc.linguistic_score is not None: parts.append(f"Język: {sc.linguistic_score}/100")
+        if sc.slide_coverage_score is not None: parts.append(f"Pokrycie slajdów: {sc.slide_coverage_score}/100")
         lines += ["  |  ".join(parts), ""]
 
     lines += ["## Podsumowanie merytoryczne", a.factual_summary or "_(brak)_", ""]
     lines += ["## Analiza językowa", a.linguistic_summary or "_(brak)_", ""]
-    if a.missed_context:
-        lines += ["## Pominięte wątki", *[f"- {c}" for c in a.missed_context], ""]
-    if a.unverified_claims:
-        lines += ["## ⚠️ Twierdzenia wymagające weryfikacji (niepotwierdzone w źródłach)",
-                  *[f"- {c}" for c in a.unverified_claims], ""]
-    if a.presentation_flow is not None:
-        lines += ["## Przepływ prezentacji", a.presentation_flow.flow_summary or "_(brak)_", ""]
-        for cov in a.slide_coverage:
-            lines.append(f"- **Slajd {cov.slide_id}** ({cov.time_on_slide_sec}s, {cov.dwell_verdict}): "
-                         f"omówione: {'; '.join(cov.covered_points) or '—'} | "
-                         f"pominięte: {'; '.join(cov.missed_points) or '—'}")
-        if a.slide_coverage:
-            lines.append("")
+    if a.missed_context: lines += ["## Pominięte wątki", *[f"- {c}" for c in a.missed_context], ""]
+    if a.unverified_claims: lines += ["## ⚠️ Twierdzenia wymagające weryfikacji",
+                                      *[f"- {c}" for c in a.unverified_claims], ""]
 
     lines += ["## Feedback mentorski", fb.executive_summary_markdown or "_(brak)_", ""]
-    if fb.strengths:
-        lines += ["### Mocne strony", *[f"- {s}" for s in fb.strengths], ""]
-    if fb.areas_for_improvement:
-        lines += ["### Obszary do poprawy", *[f"- {x}" for x in fb.areas_for_improvement], ""]
-    if fb.actionable_tips:
-        lines += ["### Wskazówki", *[f"- {t}" for t in fb.actionable_tips], ""]
-    if fb.overall_message:
-        lines += ["### Główne przesłanie", fb.overall_message, ""]
+    if fb.strengths: lines += ["### Mocne strony", *[f"- {s}" for s in fb.strengths], ""]
+    if fb.areas_for_improvement: lines += ["### Obszary do poprawy", *[f"- {x}" for x in fb.areas_for_improvement], ""]
+    if fb.actionable_tips: lines += ["### Wskazówki", *[f"- {t}" for t in fb.actionable_tips], ""]
+    if fb.overall_message: lines += ["### Główne przesłanie", fb.overall_message, ""]
 
     lines += ["---",
-              f"_Telemetria: koszt ${tel.total_cost_usd:.4f}, "
-              f"tokeny {tel.total_tokens_in + tel.total_tokens_out} "
-              f"(map {tel.map_phases_count}, reduce {tel.reduce_phases_count}), "
-              f"czas {tel.total_time_s:.1f}s._"]
+              f"_Telemetria: koszt ${tel.total_cost_usd:.4f}, tokeny {tel.total_tokens_in + tel.total_tokens_out}._"]
     return "\n".join(lines)
 
 
 def render_report(report, key: str = "report", title: str = "Raport z analizy"):
     _dc1, _dc2 = st.columns(2)
     with _dc1:
-        st.download_button(
-            "⬇️ Pobierz ten raport (Markdown)",
-            data=_report_markdown(report, title),
-            file_name=f"{key}.md",
-            mime="text/markdown",
-            key=f"dl_md_{key}",
-        )
+        st.download_button("⬇️ Pobierz ten raport (Markdown)", data=_report_markdown(report, title),
+                           file_name=f"{key}.md", mime="text/markdown")
     with _dc2:
-        st.download_button(
-            "⬇️ Pobierz do sędziego (JSON)",
-            data=report.model_dump_json(indent=2),
-            file_name=f"{key}.report.json",
-            mime="application/json",
-            key=f"dl_json_{key}",
-        )
-    if report.scorecard is not None:
-        sc = report.scorecard
+        st.download_button("⬇️ Pobierz do sędziego (JSON)", data=report.model_dump_json(indent=2),
+                           file_name=f"{key}.report.json", mime="application/json")
+
+    sc = report.scorecard
+    if sc:
         st.subheader(f"🏁 Ocena łączna: {sc.overall_score}/100 — {sc.readiness_verdict}")
         sm1, sm2, sm3 = st.columns(3)
         sm1.metric("Merytoryka", _fmt_score(sc.factual_score))
         sm2.metric("Język", _fmt_score(sc.linguistic_score))
-        if sc.slide_coverage_score is not None:
-            sm3.metric("Pokrycie slajdów", _fmt_score(sc.slide_coverage_score))
+        if sc.slide_coverage_score is not None: sm3.metric("Pokrycie slajdów", _fmt_score(sc.slide_coverage_score))
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["🧠 Analiza i Detale", "💡 Feedback", "📊 Raport Kosztowy z Roju (Telemetry)", "🔬 Debug (surowe dane)"])
+    tab1, tab2, tab3 = st.tabs(["🧠 Analiza i Detale", "💡 Feedback", "📊 Raport Kosztowy z Roju"])
 
     with tab1:
-        st.write("### Podsumowanie Merytoryczne")
         st.info(report.analysis.factual_summary)
-        st.write("### Analiza Językowa")
         st.info(report.analysis.linguistic_summary)
-        if report.analysis.missed_context:
-            st.warning(f"**Pominięto wątki:** {', '.join(report.analysis.missed_context)}")
-
         if report.analysis.unverified_claims:
-            st.warning(
-                "**⚠️ Twierdzenia wymagające weryfikacji** (nie potwierdzone w źródłach — "
-                "NIE oznaczają błędu, ale prelegent/sędzia powinien je sprawdzić):\n\n"
-                + "\n".join(f"- {c}" for c in report.analysis.unverified_claims)
-            )
-
-        if report.analysis.presentation_flow is not None:
-            flow = report.analysis.presentation_flow
-            st.write("### 🖼️ Przepływ Prezentacji")
-            st.caption(flow.flow_summary)
-            if report.analysis.slide_coverage:
-                for cov in report.analysis.slide_coverage:
-                    header = f"Slajd {cov.slide_id} — czas {cov.time_on_slide_sec}s [{cov.dwell_verdict}]"
-                    if cov.returned_later:
-                        header += " ↩ powrót"
-                    with st.expander(header):
-                        if cov.covered_points:
-                            st.markdown("**Omówione:** " + "; ".join(cov.covered_points))
-                        if cov.missed_points:
-                            st.markdown("**Pominięte:** " + "; ".join(cov.missed_points))
+            st.warning("**⚠️ Twierdzenia wymagające weryfikacji**\n" + "\n".join(
+                f"- {c}" for c in report.analysis.unverified_claims))
 
     with tab2:
-        st.write("### 📝 Rozbudowany Feedback Mentorski")
-        if report.feedback.executive_summary_markdown.strip():
-            st.markdown(report.feedback.executive_summary_markdown)
-        else:
-            st.info("Model nie wygenerował rozbudowanego eseju mentorskiego dla tego przebiegu.")
+        if report.feedback.executive_summary_markdown: st.markdown(report.feedback.executive_summary_markdown)
         st.divider()
-
         c1, c2 = st.columns(2)
-        c1.write("### 💪 Mocne Strony")
-        for s in report.feedback.strengths:
-            c1.markdown(f"- {s}")
-        c2.write("### 🛠 Obszary do poprawy")
-        for a in report.feedback.areas_for_improvement:
-            c2.markdown(f"- {a}")
-
-        st.write("### 🎯 Wskazówki (Actionable Tips)")
-        for t in report.feedback.actionable_tips:
-            st.markdown(f"👉 {t}")
-        if report.feedback.overall_message:
-            st.success(f"**Główne Przesłanie:** {report.feedback.overall_message}")
+        for s in report.feedback.strengths: c1.markdown(f"✅ {s}")
+        for a in report.feedback.areas_for_improvement: c2.markdown(f"🔧 {a}")
 
     with tab3:
-        st.write("### 🧮 Główne Metryki")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Sumaryczny Koszt (USD)", f"${report.telemetry.total_cost_usd:.4f}")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Sumaryczny Koszt", f"${report.telemetry.total_cost_usd:.4f}")
         m2.metric("Suma Tokenów", f"{report.telemetry.total_tokens_in + report.telemetry.total_tokens_out}")
-        m3.metric("Fazy Map", f"{report.telemetry.map_phases_count}")
-        m4.metric("Fazy Reduce", f"{report.telemetry.reduce_phases_count}")
-
-        if report.total_windows:
-            pct = round(100 * report.substantive_windows / report.total_windows)
-            st.caption(
-                f"📊 Gęstość merytoryczna (obserwacyjna, nie wpływa na ocenę): "
-                f"{report.substantive_windows}/{report.total_windows} okien z treścią merytoryczną ({pct}%)."
-            )
-
-        st.write("---")
-        st.write("### 🔍 Szczegóły Rozbicia (Koszt per Agent/Model)")
+        m3.metric("Fazy Map / Reduce", f"{report.telemetry.map_phases_count} / {report.telemetry.reduce_phases_count}")
         if report.telemetry.phase_details:
-            df = pd.DataFrame([detail.model_dump() for detail in report.telemetry.phase_details])
-            st.dataframe(
-                df,
-                column_config={
-                    "agent_role": "Rola / Agent",
-                    "model_name": "Użyty Model",
-                    "tokens_in": st.column_config.NumberColumn("Tokeny IN"),
-                    "tokens_out": st.column_config.NumberColumn("Tokeny OUT"),
-                    "cost_usd": st.column_config.NumberColumn("Koszt ($)", format="$%.5f"),
-                    "time_s": st.column_config.NumberColumn("Czas (s)", format="%.2f s"),
-                    "ttft_ms": st.column_config.NumberColumn("TTFT (ms)", format="%d ms")
-                },
-                hide_index=True,
-                use_container_width=True
-            )
-        else:
-            st.info("Brak szczegółowych wpisów telemetrycznych z Roju.")
-
-    with tab4:
-        st.write("### 📥 Dane wejściowe do reduktora (Hegemon / Monolit)")
-        st.caption(
-            "To co model dostał na wejściu. Dla Roju (Swarm) to zagregowany i zredukowany wynik "
-            "wszystkich chunków z fazy map. Dla monolitu — pełny prompt z transkrypcją."
-        )
-        if report.reducer_input:
-            st.text_area("reducer_input", report.reducer_input, height=300, key="dbg_reducer_input")
-        else:
-            st.info("Brak zapisanego wejścia reduktora.")
-
-        st.write("### 📤 Surowa odpowiedź modelu")
-        st.caption(
-            "Dokładnie to, co model wygenerował — zanim spróbowaliśmy wyciągnąć znaczniki. "
-            "Jeśli analiza/feedback są puste, tutaj zobaczysz dlaczego (np. model nie użył tagów)."
-        )
-        if report.raw_reducer_response:
-            st.text_area("raw_reducer_response", report.raw_reducer_response, height=400,
-                         key="dbg_raw_response")
-        else:
-            st.info("Brak zapisanej surowej odpowiedzi.")
+            df = pd.DataFrame([d.model_dump() for d in report.telemetry.phase_details])
+            st.dataframe(df, hide_index=True, use_container_width=True)
 
 
 st.sidebar.header("⚙️ Konfiguracja Systemu")
 all_models = Config.get_all_models()
 
-scenario_choice = st.sidebar.selectbox(
-    "Wybierz Scenariusz Badawczy:",
-    options=[e for e in ExperimentScenario],
-    format_func=lambda x: f"{x.value} - {x.name}"
-)
-
-st.sidebar.subheader("Opcje Eksperymentalne")
-use_llmlingua_switch = st.sidebar.checkbox(
-    "Użyj LLMLingua (Kompresja Entropijna przed Hegemonem)",
-    value=False,
-    help="Wymaga zainstalowanego środowiska PyTorch. Drastycznie tnie zużycie tokenów wyjściowych."
-)
+scenario_choice = st.sidebar.selectbox("Wybierz Scenariusz Badawczy:", options=[e for e in ExperimentScenario],
+                                       format_func=lambda x: f"{x.value} - {x.name}")
+use_llmlingua_switch = st.sidebar.checkbox("Użyj LLMLingua (Kompresja Entropijna)", value=False)
 
 st.sidebar.subheader("Modele dla ról")
 _HEGEMON_DEFAULT = "ollama/llama3.1:70b"
 _FACTUAL_DEFAULT = "ollama/Speakleash/bielik-11b-v3.0-instruct:Q5_K_M"
 _LINGUISTIC_DEFAULT = "ollama/llama3.1:8b"
 
-hegemon_model = st.sidebar.selectbox(
-    "Hegemon (Reduce / Monolith):",
-    options=all_models,
-    index=all_models.index(_HEGEMON_DEFAULT) if _HEGEMON_DEFAULT in all_models else 0
-)
-
-factual_model = st.sidebar.selectbox(
-    "Agent Merytoryczny (Map):",
-    options=all_models,
-    index=all_models.index(_FACTUAL_DEFAULT) if _FACTUAL_DEFAULT in all_models else 0
-)
-
-linguistic_model = st.sidebar.selectbox(
-    "Agent Językowy (Map):",
-    options=all_models,
-    index=all_models.index(_LINGUISTIC_DEFAULT) if _LINGUISTIC_DEFAULT in all_models else 0
-)
+hegemon_model = st.sidebar.selectbox("Hegemon (Reduce / Monolith):", options=all_models,
+                                     index=all_models.index(_HEGEMON_DEFAULT) if _HEGEMON_DEFAULT in all_models else 0)
+factual_model = st.sidebar.selectbox("Agent Merytoryczny (Map):", options=all_models,
+                                     index=all_models.index(_FACTUAL_DEFAULT) if _FACTUAL_DEFAULT in all_models else 0)
+linguistic_model = st.sidebar.selectbox("Agent Językowy (Map):", options=all_models, index=all_models.index(
+    _LINGUISTIC_DEFAULT) if _LINGUISTIC_DEFAULT in all_models else 0)
 
 st.subheader("📂 Krok 1: Wczytaj dane wejściowe")
-uploaded_zip = st.file_uploader("1. Załaduj wygenerowaną paczkę ZIP z danymi (Transkrypcja + Slajdy)", type="zip")
+uploaded_zip = st.file_uploader("1. Załaduj wygenerowaną paczkę ZIP z danymi", type="zip")
+if uploaded_zip and st.button("Sprawdź i załaduj strukturę paczki"):
+    process_uploaded_zip(uploaded_zip)
 
-if uploaded_zip is not None:
-    if st.button("Sprawdź i załaduj strukturę paczki"):
-        process_uploaded_zip(uploaded_zip)
-
-uploaded_kb_pdf = st.file_uploader(
-    "2. (Opcjonalnie) Załaduj bazę wiedzy PDF dla RAG (scenariusze 4 i 5)",
-    type="pdf"
-)
+uploaded_kb_pdf = st.file_uploader("2. (Opcjonalnie) Baza wiedzy PDF dla RAG", type="pdf")
 
 st.divider()
-
 st.subheader("📋 Krok 2: Weryfikacja Metadanych Wykładu")
-st.info(
-    "Dane zaczytane z pliku metadata.json. Metryki ilościowe (czas, słowa, pauzy) przekazywane są do modeli automatycznie w tle.")
-
 md = st.session_state.zip_data["metadata"]
 
 with st.form("metadata_form"):
@@ -482,151 +320,59 @@ with st.form("metadata_form"):
     with col1:
         speaker_role = st.text_input("Rola prelegenta", value=md.get("speaker_role", ""))
         target_audience = st.text_input("Grupa docelowa", value=md.get("target_audience", ""))
-
         kl_options = ["Brak", "Podstawowy", "Średni", "Zaawansowany", "Ekspert"]
-        current_kl = md.get("knowledge_level", "Podstawowy")
-        kl_index = kl_options.index(current_kl) if current_kl in kl_options else 1
-        knowledge_level = st.selectbox("Poziom wiedzy odbiorców", kl_options, index=kl_index)
-
+        knowledge_level = st.selectbox("Poziom wiedzy odbiorców", kl_options,
+                                       index=kl_options.index(md.get("knowledge_level", "Podstawowy")) if md.get(
+                                           "knowledge_level", "Podstawowy") in kl_options else 1)
     with col2:
         main_topic = st.text_input("Główny temat", value=md.get("main_topic", ""))
-        st.markdown("**Statystyki nagrania (Dołączone do kontekstu LLM):**")
-        st.caption(
-            f"Czas: **{md.get('total_duration_sec', 0)}s** | "
-            f"Słowa: **{md.get('total_words', 0)}** | "
-            f"WPM (Min/Max): **{md.get('slowest_chunk_wpm', 0)} / {md.get('fastest_chunk_wpm', 0)}**\n\n"
-            f"Wypełniacze: **{md.get('total_filler_words', 0)}** | "
-            f"Pauzy: **{md.get('total_significant_pauses', 0)} ({md.get('total_significant_pauses_duration_sec', 0)}s)** | "
-            f"Złe słowa: **{md.get('total_unclear_words', 0)}**"
-        )
+        st.markdown(f"**Czas:** {md.get('total_duration_sec', 0)}s | **Słowa:** {md.get('total_words', 0)}")
 
-    submit_disabled = not st.session_state.zip_data["is_valid"]
-    submitted = st.form_submit_button("🚀 Uruchom Ewaluację Przemówienia", disabled=submit_disabled)
+    submitted = st.form_submit_button("🚀 Uruchom Ewaluację Przemówienia",
+                                      disabled=not st.session_state.zip_data["is_valid"])
 
 if submitted and st.session_state.zip_data["is_valid"]:
     metadata = LectureMetadata(
-        speaker_role=speaker_role,
-        target_audience=target_audience,
-        main_topic=main_topic,
-        knowledge_level=knowledge_level,
-        has_knowledge_base_file=md.get("has_knowledge_base_file", False),
-        total_duration_sec=md.get("total_duration_sec", 0.0),
-        total_words=md.get("total_words", 0),
-        fastest_chunk_wpm=md.get("fastest_chunk_wpm", 0),
-        slowest_chunk_wpm=md.get("slowest_chunk_wpm", 0),
-        total_filler_words=md.get("total_filler_words", 0),
-        total_repeated_tendencies=md.get("total_repeated_tendencies", 0),
-        total_significant_pauses=md.get("total_significant_pauses", 0),
-        total_significant_pauses_duration_sec=md.get("total_significant_pauses_duration_sec", 0.0),
-        total_unclear_words=md.get("total_unclear_words", 0),
-        overall_transcription_confidence=md.get("overall_transcription_confidence", 0.0)
+        speaker_role=speaker_role, target_audience=target_audience, main_topic=main_topic,
+        knowledge_level=knowledge_level, total_duration_sec=md.get("total_duration_sec", 0.0),
+        total_words=md.get("total_words", 0)
     )
-
     system_config = SystemConfiguration(
-        scenario=scenario_choice,
-        hegemon_model=hegemon_model,
-        agent_models=AgentModelsConfig(
-            factual_model=factual_model,
-            linguistic_model=linguistic_model
-        ),
-        use_tools=True if scenario_choice in [ExperimentScenario.SWARM_NAIVE_RAG_WEB,
-                                              ExperimentScenario.SWARM_PRESENTATION_RAG_WEB] else False,
+        scenario=scenario_choice, hegemon_model=hegemon_model,
+        agent_models=AgentModelsConfig(factual_model=factual_model, linguistic_model=linguistic_model),
+        use_tools=scenario_choice in [ExperimentScenario.SWARM_NAIVE_RAG_WEB,
+                                      ExperimentScenario.SWARM_PRESENTATION_RAG_WEB],
         use_llmlingua=use_llmlingua_switch
     )
-    raw_text = st.session_state.zip_data["raw_text"]
-    formatted_text = st.session_state.zip_data["formatted_text"]
-    chunks = st.session_state.zip_data["chunks"]
-    timeline = st.session_state.zip_data["timeline"]
-    slide_summaries = st.session_state.zip_data["slide_summaries"]
 
-    parsed_chunks = [ChunkPayload(**c) for c in chunks]
-    parsed_summaries = {k: SlideSummary(**v) for k, v in slide_summaries.items()}
-    parsed_timeline = TimelinePayload(**timeline) if timeline else None
-
-    with st.status(f"Orkiestrator pracuje (Scenariusz: {scenario_choice.name})...", expanded=True) as status:
-        obs_manager = ObservabilityManager()
-        real_gateway = LLMGateway(obs_manager)
-
-
-        def _progress(msg: str):
-            status.write(msg)
-
-
-        orchestrator = Orchestrator(system_config, gateway=real_gateway, progress_cb=_progress)
-
-        selected_models = [system_config.hegemon_model, factual_model, linguistic_model, Config.UTILITY_MODEL]
-        missing_models = check_ollama_models(selected_models)
-        if missing_models:
-            status.update(label="Brakuje modeli w Ollama", state="error")
-            st.error(
-                "❌ Wybrane modele nie są dostępne na serwerze Ollama:\n\n"
-                + "\n".join(f"- `{m}`" for m in missing_models)
-                + "\n\nPobierz je (`ollama pull <nazwa>`) albo wybierz w panelu bocznym modele, "
-                  "które faktycznie masz. Sprawdź dokładne nazwy: `ollama list`."
-            )
-            st.stop()
-
-        knowledge_base_bytes = uploaded_kb_pdf.getvalue() if uploaded_kb_pdf is not None else None
-
+    with st.status(f"Orkiestrator pracuje ({scenario_choice.name})...", expanded=True) as status:
+        orchestrator = Orchestrator(system_config, gateway=LLMGateway(ObservabilityManager()), progress_cb=status.write)
         try:
             report = orchestrator.execute_pipeline(
-                metadata=metadata,
-                raw_text=raw_text,
-                formatted_text=formatted_text,
-                chunks=parsed_chunks,
-                timeline=parsed_timeline,
-                slide_summaries=parsed_summaries,
-                knowledge_base_bytes=knowledge_base_bytes
+                metadata=metadata, raw_text=st.session_state.zip_data["raw_text"],
+                formatted_text=st.session_state.zip_data["formatted_text"],
+                chunks=[ChunkPayload(**c) for c in st.session_state.zip_data["chunks"]],
+                timeline=TimelinePayload(**st.session_state.zip_data["timeline"]) if st.session_state.zip_data.get(
+                    "timeline") else None,
+                slide_summaries={k: SlideSummary(**v) for k, v in
+                                 st.session_state.zip_data.get("slide_summaries", {}).items()},
+                knowledge_base_bytes=uploaded_kb_pdf.getvalue() if uploaded_kb_pdf else None
             )
+            st.session_state.evaluated_reports[scenario_choice.name] = {
+                "report": report, "duration_sec": metadata.total_duration_sec,
+                "total_words": metadata.total_words, "raw_excerpt": st.session_state.zip_data["raw_text"],
+                "input_fingerprint": hashlib.sha256(st.session_state.zip_data["raw_text"].encode("utf-8")).hexdigest(),
+            }
+            status.update(label="Zakończono sukcesem!", state="complete")
         except Exception as e:
-            msg = str(e).lower()
-            is_oom = any(m in msg for m in (
-                "process has terminated", 'signal "killed"', "signal: killed",
-                "out of memory", "cudamalloc", "failed to allocate"
-            ))
-            status.update(label="Analiza nie powiodła się", state="error")
-            if is_oom:
-                st.error(
-                    "❌ Serwer Ollama został zabity (prawdopodobnie brak pamięci — OOM).\n\n"
-                    f"Model **{system_config.hegemon_model}** nie zmieścił się w pamięci GPU/RAM "
-                    "dla tak długiego nagrania. Na karcie **NVIDIA L4 (24 GB)** model 70B się nie mieści.\n\n"
-                    "**Co zrobić:**\n"
-                    "- Wybierz mniejszy model Hegemona (np. `ollama/gemma3:27b`), lub\n"
-                    "- Użyj scenariusza **Roju (Swarm)** zamiast monolitu — dzieli tekst na fragmenty "
-                    "i zużywa znacznie mniej pamięci na długich wystąpieniach, lub\n"
-                    "- Użyj modelu chmurowego (gpt-4o / Claude), który nie podlega lokalnemu OOM."
-                )
-            else:
-                st.error(f"❌ Analiza nie powiodła się: {e}")
+            status.update(label="Błąd", state="error");
+            st.error(f"❌ {e}");
             st.stop()
 
-        status.update(label="Analiza zakończona sukcesem!", state="complete")
-
-    st.success("Analiza zakończona sukcesem!")
-
-    st.session_state.evaluated_reports[scenario_choice.name] = {
-        "report": report,
-        "duration_sec": metadata.total_duration_sec,
-        "total_words": metadata.total_words,
-        "raw_excerpt": raw_text,
-        "input_fingerprint": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
-    }
-    st.session_state.active_report_scenario = scenario_choice.name
-
 if st.session_state.evaluated_reports:
-    st.divider()
-    st.header("📄 Raport z analizy")
-    scenario_names = list(st.session_state.evaluated_reports.keys())
-    default_idx = scenario_names.index(st.session_state.active_report_scenario) \
-        if st.session_state.get("active_report_scenario") in scenario_names else 0
-    chosen = st.selectbox(
-        "Pokaż raport dla scenariusza:",
-        options=scenario_names,
-        index=default_idx,
-        key="report_view_selector"
-    )
-    render_report(st.session_state.evaluated_reports[chosen]["report"],
-                  key=f"view_{chosen}", title=f"Raport — {chosen}")
+    chosen = st.selectbox("Pokaż raport dla scenariusza:", options=list(st.session_state.evaluated_reports.keys()))
+    render_report(st.session_state.evaluated_reports[chosen]["report"], key=f"view_{chosen}",
+                  title=f"Raport — {chosen}")
 
 # =========================================================================
 # SEKCJA WSADOWA
@@ -637,256 +383,102 @@ st.header("🧬 Uruchomienie wsadowe (scenariusze 1–4/5)")
 _lc, _rc = st.columns([1, 2])
 with _lc:
     if st.button(f"📂 Wczytaj zapisane wyniki z dysku ({Config.RUNS_DIR})"):
-        n = _load_runs_from_disk()
-        st.success(f"Wczytano {n} nowych wyników z dysku.") if n else st.info("Brak nowych wyników na dysku.")
-with _rc:
-    st.caption(f"Wyniki w pamięci sesji: **{len(st.session_state.runs)}** "
-               f"(zapis na dysku: `{Config.RUNS_DIR}/run_*.json`).")
+        st.success(f"Wczytano {_load_runs_from_disk()} nowych wyników z dysku.")
+with _rc: st.caption(f"Wyniki w pamięci sesji: **{len(st.session_state.runs)}**")
 
-if not st.session_state.zip_data["is_valid"]:
-    st.info("Najpierw wczytaj paczkę ZIP powyżej, aby uruchomić tryb wsadowy.")
-else:
-    _has_presentation = bool(st.session_state.zip_data.get("timeline")) or bool(
-        st.session_state.zip_data.get("slide_summaries"))
-    _default_scenarios = scenarios_for_batch(_has_presentation)
-    st.caption(
-        f"Modele z panelu bocznego: Hegemon=`{hegemon_model}`, Merytoryczny=`{factual_model}`, "
-        f"Językowy=`{linguistic_model}`. Prezentacja wykryta: {'TAK' if _has_presentation else 'nie'}."
-    )
+if st.session_state.zip_data["is_valid"]:
     chosen_scenarios = st.multiselect(
-        "Scenariusze do uruchomienia (kolejno):",
-        options=[e for e in ExperimentScenario],
-        default=_default_scenarios,
+        "Scenariusze do uruchomienia:", options=[e for e in ExperimentScenario],
+        default=scenarios_for_batch(bool(st.session_state.zip_data.get("timeline"))),
         format_func=lambda x: f"{x.value} - {x.name}"
     )
-    auto_judge = st.checkbox("Po uruchomieniu od razu oceń i porównaj (sędzia)", value=True)
-    batch_judge_model = st.selectbox("Model sędziego (dla oceny wsadu):", options=Config.get_all_models(), index=0,
-                                     key="batch_judge_model")
-    batch_judge_cfg = _judge_config_controls("batch")
-    batch_kb_pdf = st.file_uploader("(Opcjonalnie) PDF bazy wiedzy dla scenariuszy RAG (4/5)", type="pdf",
-                                    key="batch_kb")
 
-    if st.button("🚀 Uruchom wybrane scenariusze", disabled=not chosen_scenarios):
-        missing = check_ollama_models([hegemon_model, factual_model, linguistic_model, Config.UTILITY_MODEL])
-        if missing:
-            st.error("❌ Brakuje modeli w Ollama: " + ", ".join(f"`{m}`" for m in missing)
-                     + ". Pobierz je lub zmień wybór w panelu bocznym.")
-            st.stop()
-
-        _md = st.session_state.zip_data["metadata"]
-        _fingerprint = hashlib.sha256(st.session_state.zip_data["raw_text"].encode("utf-8")).hexdigest()
-        _kb_bytes = batch_kb_pdf.getvalue() if batch_kb_pdf is not None else None
-
+    if st.button("🚀 Uruchom wybrane scenariusze wsadowo", disabled=not chosen_scenarios):
         with st.status("Tryb wsadowy pracuje…", expanded=True) as bstatus:
-            def _bprogress(m: str):
-                bstatus.write(m)
-
-
             def _persist(r):
                 st.session_state.runs.append(r)
                 try:
                     import os
                     os.makedirs(Config.RUNS_DIR, exist_ok=True)
-                    with open(os.path.join(Config.RUNS_DIR, f"run_{r.run_id}.json"), "w",
-                              encoding="utf-8") as fh:
+                    with open(os.path.join(Config.RUNS_DIR, f"run_{r.run_id}.json"), "w", encoding="utf-8") as fh:
                         fh.write(r.model_dump_json(indent=2))
-                except Exception as _e:
-                    bstatus.write(f"   ⚠️ Nie udało się zapisać na dysk: {_e}")
+                except:
+                    pass
 
 
             new_runs = run_batch(
-                scenarios=chosen_scenarios,
-                zip_data=st.session_state.zip_data,
-                speaker_role=speaker_role, target_audience=target_audience,
-                main_topic=main_topic, knowledge_level=knowledge_level,
+                scenarios=chosen_scenarios, zip_data=st.session_state.zip_data, speaker_role=speaker_role,
+                target_audience=target_audience, main_topic=main_topic, knowledge_level=knowledge_level,
                 hegemon_model=hegemon_model, factual_model=factual_model, linguistic_model=linguistic_model,
                 use_llmlingua=use_llmlingua_switch,
-                input_fingerprint=_fingerprint,
-                source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
-                knowledge_base_bytes=_kb_bytes,
-                progress_cb=_bprogress,
-                on_result=_persist,
+                input_fingerprint=hashlib.sha256(st.session_state.zip_data["raw_text"].encode("utf-8")).hexdigest(),
+                source_label=uploaded_zip.name if uploaded_zip else "zip",
+                progress_cb=bstatus.write, on_result=_persist,
             )
-
-            batch_eval = None
-            if auto_judge and len(new_runs) >= 1:
-                bstatus.write("🧑‍⚖️ Sędzia ocenia wyniki wsadu…")
-                eval_gateway = LLMGateway(ObservabilityManager())
-                engine = EvaluationEngine(eval_gateway, batch_judge_model, **batch_judge_cfg)
-                reports = {r.display_label(): r.report for r in new_runs}
-                duration = max((r.duration_sec for r in new_runs), default=0.0)
-                excerpt = st.session_state.zip_data.get("raw_text", "")
-
-                batch_eval, batch_extra = asyncio.run(engine.evaluate(
-                    transcript_excerpt=excerpt,
-                    reports=reports,
-                    duration_sec=duration,
-                    total_words=_md.get("total_words", 0),
-                    expected_factual=70.0,
-                    expected_linguistic=30.0
-                ))
-                eval_gateway.reset_session_telemetry()
-
             bstatus.update(label=f"Wsad zakończony: {len(new_runs)} scenariuszy.", state="complete")
 
-        export = BatchExport(
-            created_at=datetime.now(timezone.utc).isoformat(),
-            source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
-            runs=new_runs,
-            evaluation=batch_eval,
-        )
-        st.success(f"✅ Uruchomiono {len(new_runs)} scenariuszy. Pobierz raport poniżej.")
-        st.download_button(
-            "⬇️ Pobierz raport wsadu (JSON)",
-            data=export.model_dump_json(indent=2),
-            file_name=f"batch_{export.created_at[:19].replace(':', '-')}.json",
-            mime="application/json"
-        )
-        st.download_button(
-            "⬇️ Pobierz podsumowanie (Markdown)",
-            data=_batch_markdown(export),
-            file_name=f"batch_{export.created_at[:19].replace(':', '-')}.md",
-            mime="text/markdown"
-        )
+        export = BatchExport(created_at=datetime.now(timezone.utc).isoformat(),
+                             source_label=uploaded_zip.name if uploaded_zip else "zip", runs=new_runs)
+        st.success(f"✅ Uruchomiono {len(new_runs)} scenariuszy.")
+        st.download_button("⬇️ Pobierz raport wsadu (JSON)", data=export.model_dump_json(indent=2),
+                           file_name="batch.json")
 
 # =========================================================================
-# SEKCJA MAP/REDUCE: uruchom drogą fazę MAP raz, potem porównuj reduktory
+# SEKCJA MAP/REDUCE: Uruchom MAP raz i testuj różnych Hegemonów
 # =========================================================================
 st.divider()
 st.header("🧩 Faza MAP osobno + porównanie reduktorów")
-st.caption(
-    "Uruchom kosztowną fazę MAP (agenci roju) RAZ, a następnie odpalaj fazę REDUCE (Hegemon) na "
-    "różnych modelach na IDENTYCZNYCH danych — bez ponownego mapowania. Tylko scenariusze roju (3–5)."
-)
 
 _mlc, _mrc = st.columns([1, 2])
 with _mlc:
-    if st.button(f"📂 Wczytaj zapisane fazy MAP z dysku ({Config.MAPS_DIR})"):
-        n = _load_maps_from_disk()
-        st.success(f"Wczytano {n} nowych faz MAP.") if n else st.info("Brak nowych faz MAP na dysku.")
-with _mrc:
-    st.caption(f"Fazy MAP w pamięci sesji: **{len(st.session_state.map_results)}** "
-               f"(zapis: `{Config.MAPS_DIR}/map_*.json`).")
+    if st.button(f"📂 Wczytaj zapisane fazy MAP ({Config.MAPS_DIR})"):
+        st.success(f"Wczytano {_load_maps_from_disk()} nowych faz MAP.")
+with _mrc: st.caption(f"Fazy MAP w pamięci: {len(st.session_state.map_results)}")
 
 if st.session_state.zip_data["is_valid"]:
-    _swarm_scenarios = [ExperimentScenario.SWARM_NAIVE_NO_RAG, ExperimentScenario.SWARM_NAIVE_RAG_WEB,
-                        ExperimentScenario.SWARM_PRESENTATION_RAG_WEB]
-    map_scenario = st.selectbox(
-        "Scenariusz dla fazy MAP:", options=_swarm_scenarios,
-        format_func=lambda x: f"{x.value} - {x.name}", key="map_scenario"
-    )
-    map_kb_pdf = st.file_uploader("(Opcjonalnie) PDF bazy wiedzy (scenariusze 4/5)", type="pdf", key="map_kb")
-    if st.button("🧠 Uruchom TYLKO fazę MAP", key="run_map_only"):
-        _missing = check_ollama_models([factual_model, linguistic_model, Config.UTILITY_MODEL])
-        if _missing:
-            st.error("❌ Brakuje modeli MAP w Ollama: " + ", ".join(f"`{m}`" for m in _missing))
-            st.stop()
-        _cfg = SystemConfiguration(
-            scenario=map_scenario, hegemon_model=hegemon_model,
-            agent_models=AgentModelsConfig(factual_model=factual_model, linguistic_model=linguistic_model),
-            use_tools=map_scenario in (ExperimentScenario.SWARM_NAIVE_RAG_WEB,
-                                       ExperimentScenario.SWARM_PRESENTATION_RAG_WEB),
-            use_llmlingua=use_llmlingua_switch,
-        )
+    map_scenario = st.selectbox("Scenariusz dla MAP:",
+                                options=[ExperimentScenario.SWARM_NAIVE_NO_RAG, ExperimentScenario.SWARM_NAIVE_RAG_WEB,
+                                         ExperimentScenario.SWARM_PRESENTATION_RAG_WEB],
+                                format_func=lambda x: f"{x.value} - {x.name}")
+    if st.button("🧠 Uruchom TYLKO fazę MAP"):
         with st.status("Faza MAP pracuje…", expanded=True) as mstatus:
-            _gw = LLMGateway(ObservabilityManager())
-            _orch = Orchestrator(_cfg, gateway=_gw, progress_cb=lambda m: mstatus.write(m))
-            _zd = st.session_state.zip_data
+            _orch = Orchestrator(SystemConfiguration(scenario=map_scenario, hegemon_model=hegemon_model,
+                                                     agent_models=AgentModelsConfig(factual_model=factual_model,
+                                                                                    linguistic_model=linguistic_model)),
+                                 gateway=LLMGateway(ObservabilityManager()), progress_cb=mstatus.write)
             try:
                 _mr = _orch.execute_map_only(
                     metadata=LectureMetadata(
-                        speaker_role=speaker_role, target_audience=target_audience, main_topic=main_topic,
-                        knowledge_level=knowledge_level,
-                        total_duration_sec=_zd["metadata"].get("total_duration_sec", 0.0),
-                        total_words=_zd["metadata"].get("total_words", 0),
-                    ),
-                    chunks=[ChunkPayload(**c) for c in _zd.get("chunks", [])],
-                    timeline=TimelinePayload(**_zd["timeline"]) if _zd.get("timeline") else None,
-                    slide_summaries={k: SlideSummary(**v) for k, v in _zd.get("slide_summaries", {}).items()},
-                    knowledge_base_bytes=map_kb_pdf.getvalue() if map_kb_pdf is not None else None,
-                    source_label=uploaded_zip.name if uploaded_zip is not None else "zip",
-                    input_fingerprint=hashlib.sha256(_zd["raw_text"].encode("utf-8")).hexdigest(),
+                        total_duration_sec=st.session_state.zip_data["metadata"].get("total_duration_sec", 0.0),
+                        total_words=st.session_state.zip_data["metadata"].get("total_words", 0)),
+                    chunks=[ChunkPayload(**c) for c in st.session_state.zip_data.get("chunks", [])],
+                    timeline=TimelinePayload(**st.session_state.zip_data["timeline"]) if st.session_state.zip_data.get(
+                        "timeline") else None,
+                    slide_summaries={k: SlideSummary(**v) for k, v in
+                                     st.session_state.zip_data.get("slide_summaries", {}).items()},
+                    input_fingerprint=hashlib.sha256(st.session_state.zip_data["raw_text"].encode("utf-8")).hexdigest(),
                 )
-
                 st.session_state.map_results.append(_mr)
-                try:
-                    import os
-
-                    os.makedirs(Config.MAPS_DIR, exist_ok=True)
-                    with open(os.path.join(Config.MAPS_DIR, f"map_{_mr.map_id}.json"), "w",
-                              encoding="utf-8") as _fh:
-                        _fh.write(_mr.model_dump_json(indent=2))
-                except Exception as _e:
-                    mstatus.write(f"   ⚠️ Nie udało się zapisać fazy MAP na dysk: {_e}")
                 mstatus.update(label="Faza MAP zakończona.", state="complete")
-
             except Exception as e:
-                crash_msg = f"Krytyczny błąd podczas fazy MAP: {type(e).__name__} - {str(e)}"
-                import logging
-
-                logging.getLogger(__name__).error(f"[FATAL] {crash_msg}", exc_info=True)
-                mstatus.write(f"❌ SYSTEM ZATRZYMANY: {crash_msg}")
-                mstatus.update(label="Faza MAP zakończona błędem", state="error")
+                mstatus.update(label="Błąd MAP", state="error");
                 st.stop()
-        st.success(f"✅ Zapisano fazę MAP: {_mr.map_id} ({_mr.total_windows} okien).")
-        _substantive = _mr.substantive_windows
-        if _substantive == 0 and _mr.total_windows:
-            st.error(
-                f"⚠️ UWAGA: 0/{_mr.total_windows} okien z treścią merytoryczną — agenci nie zwrócili "
-                "użytecznych wyników (możliwy problem z parsowaniem lub modelem). Sprawdź ślad poniżej "
-                "oraz ostrzeżenia w konsoli ('structured parse yielded an EMPTY object')."
-            )
-        with st.expander(f"🔬 Ślad fazy MAP per okno ({_substantive}/{_mr.total_windows} z treścią)"):
-            if _mr.map_trace:
-                st.text_area("map_trace", "\n".join(_mr.map_trace), height=400, key=f"trace_{_mr.map_id}")
-            else:
-                st.info("Brak śladu.")
-        st.download_button("⬇️ Pobierz fazę MAP (JSON)", data=_mr.model_dump_json(indent=2),
-                           file_name=f"map_{_mr.map_id}.json", mime="application/json")
-else:
-    st.info("Wczytaj paczkę ZIP, aby uruchomić fazę MAP.")
 
 if st.session_state.map_results:
-    st.subheader("♻️ Reduce z zapisanej fazy MAP")
-    _mr_labels = {m.display_label(): m for m in st.session_state.map_results}
-    _chosen_map_label = st.selectbox("Wybierz zapisaną fazę MAP:", options=list(_mr_labels.keys()),
-                                     key="reduce_map_pick")
-    _reduce_hegemon = st.selectbox("Model Hegemona (reduktora):", options=Config.get_all_models(),
-                                   index=Config.get_all_models().index(hegemon_model)
-                                   if hegemon_model in Config.get_all_models() else 0,
-                                   key="reduce_hegemon_pick")
-    if st.button("🏛️ Uruchom REDUCE na wybranym modelu", key="run_reduce_from_map"):
-        _mr = _mr_labels[_chosen_map_label]
-        if check_ollama_models([_reduce_hegemon]):
-            st.error(f"❌ Model `{_reduce_hegemon}` nie jest dostępny w Ollama.")
-            st.stop()
-        _cfg = SystemConfiguration(
-            scenario=ExperimentScenario[_mr.scenario_name], hegemon_model=_reduce_hegemon,
-            agent_models=AgentModelsConfig(factual_model=_mr.factual_model, linguistic_model=_mr.linguistic_model),
-        )
-        with st.status(f"REDUCE (Hegemon={_reduce_hegemon}) na MAP {_mr.map_id}…", expanded=True) as rstatus:
-            _gw = LLMGateway(ObservabilityManager())
-            _orch = Orchestrator(_cfg, gateway=_gw, progress_cb=lambda m: rstatus.write(m))
+    _chosen_map_label = st.selectbox("Wybierz zapisaną fazę MAP:",
+                                     options=list({m.display_label(): m for m in st.session_state.map_results}.keys()))
+    _reduce_hegemon = st.selectbox("Model Hegemona:", options=Config.get_all_models())
+    if st.button("🏛️ Uruchom REDUCE"):
+        _mr = {m.display_label(): m for m in st.session_state.map_results}[_chosen_map_label]
+        with st.status(f"REDUCE ({_reduce_hegemon})…", expanded=True) as rstatus:
+            _orch = Orchestrator(
+                SystemConfiguration(scenario=ExperimentScenario[_mr.scenario_name], hegemon_model=_reduce_hegemon,
+                                    agent_models=AgentModelsConfig(factual_model=_mr.factual_model,
+                                                                   linguistic_model=_mr.linguistic_model)),
+                gateway=LLMGateway(ObservabilityManager()), progress_cb=rstatus.write)
             _report = _orch.execute_reduce_from_map(_mr)
-
-            from datetime import datetime as _dt, timezone as _tz
-            import uuid as _uuid
-            from models.schemas import RunModels, RunResult
-
-            _rr = RunResult(
-                run_id=_uuid.uuid4().hex[:12], created_at=_dt.now(_tz.utc).isoformat(),
-                scenario_name=f"{_mr.scenario_name} (reduce:{_reduce_hegemon.split('/')[-1]})",
-                models=RunModels(hegemon_model=_reduce_hegemon, factual_model=_mr.factual_model,
-                                 linguistic_model=_mr.linguistic_model, utility_model=_mr.utility_model),
-                input_fingerprint=_mr.input_fingerprint, source_label=_mr.source_label,
-                duration_sec=_mr.duration_sec, main_topic=_mr.main_topic,
-                target_audience=_mr.target_audience, knowledge_level=_mr.knowledge_level,
-                report=_report,
-            )
-            st.session_state.runs.append(_rr)
             rstatus.update(label="REDUCE zakończony.", state="complete")
-        st.success(f"✅ Reduce gotowy (Hegemon={_reduce_hegemon}). Zapisano jako run {_rr.run_id}.")
-        render_report(_report, key=f"reduce_{_rr.run_id}", title=_rr.scenario_name)
+            render_report(_report, key="reduce_latest", title=_mr.scenario_name)
 
 # =========================================================================
 # SEKCJA EWALUACJI / PORÓWNANIA SCENARIUSZY (MLOps Leaderboard)
@@ -898,33 +490,31 @@ cached = st.session_state.evaluated_reports
 if not cached:
     st.info("Uruchom co najmniej jeden scenariusz, aby zgromadzić raporty do porównania.")
 else:
-    st.caption(f"Zbuforowane raporty: {', '.join(cached.keys())}")
-    all_models = Config.get_all_models()
-    judge_model = st.selectbox("Model sędziego (Judge):", options=all_models, index=0)
+    judge_model = st.selectbox("Model sędziego (Judge):", options=Config.get_all_models(), index=0)
     manual_judge_cfg = _judge_config_controls("manual")
 
     st.subheader("🎯 Złoty Wzorzec (Ground Truth)")
-    st.caption("Ustaw spodziewane oceny dla tego nagrania. Sędzia wyliczy odchylenie (RMSE) testowanych modeli.")
     col_gt1, col_gt2 = st.columns(2)
     with col_gt1:
         exp_factual = st.slider("Oczekiwana Merytoryka", 0.0, 100.0, 70.0, 0.5)
     with col_gt2:
         exp_linguistic = st.slider("Oczekiwany Język", 0.0, 100.0, 30.0, 0.5)
 
-    selected = st.multiselect(
-        "Wybierz scenariusze do porównania:",
-        options=list(cached.keys()),
-        default=list(cached.keys())
-    )
+    st.subheader("📁 Pliki referencyjne błędów (JSON Golden Sets)")
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        golden_factual_file = st.file_uploader("Złoty Wzorzec MERYTORYCZNY (JSON)", type=["json"],
+                                               key="leaderboard_factual")
+    with col_f2:
+        golden_linguistic_file = st.file_uploader("Złoty Wzorzec LINGWISTYCZNY (JSON)", type=["json"],
+                                                  key="leaderboard_linguistic")
+
+    selected = st.multiselect("Wybierz scenariusze do porównania:", options=list(cached.keys()),
+                              default=list(cached.keys()))
 
     if st.button("🚀 Wygeneruj Ranking (LLM-as-a-Judge)") and selected:
-        fingerprints = {cached[name].get("input_fingerprint") for name in selected}
-        if len(fingerprints) > 1:
-            st.error(
-                "⚠️ Wybrane scenariusze pochodzą z RÓŻNYCH danych wejściowych (różne ZIP-y). "
-                "Porównanie ma sens tylko dla tego samego wystąpienia. Uruchom scenariusze na tej samej paczce."
-            )
-            st.stop()
+        txt_factual = read_golden_set(golden_factual_file)
+        txt_linguistic = read_golden_set(golden_linguistic_file)
 
         reports = {name: cached[name]["report"] for name in selected}
         duration = max((cached[name]["duration_sec"] for name in selected), default=0.0)
@@ -932,162 +522,100 @@ else:
         excerpt = next((cached[name]["raw_excerpt"] for name in selected), "")
 
         with st.spinner("Sędzia ocenia raporty..."):
-            eval_obs = ObservabilityManager()
-            eval_gateway = LLMGateway(eval_obs)
+            eval_gateway = LLMGateway(ObservabilityManager())
             engine = EvaluationEngine(eval_gateway, judge_model, **manual_judge_cfg)
-
             eval_report, extra_metrics = asyncio.run(engine.evaluate(
-                transcript_excerpt=excerpt,
-                reports=reports,
-                duration_sec=duration,
-                total_words=total_words,
-                expected_factual=exp_factual,
-                expected_linguistic=exp_linguistic
+                transcript_excerpt=excerpt, reports=reports, duration_sec=duration,
+                total_words=total_words, expected_factual=exp_factual, expected_linguistic=exp_linguistic,
+                golden_factual=txt_factual, golden_linguistic=txt_linguistic
             ))
 
+        # Agregacja zwycięstw H2H (tylko na potrzeby sortowania pod maską)
         h2h_wins = {name: 0 for name in selected}
         if eval_report.pairwise:
             for pref in eval_report.pairwise:
                 if pref.winner in h2h_wins:
                     h2h_wins[pref.winner] += 1
 
-        st.subheader("🥇 Tabela Wyników (Posortowana wg Wygranych i Jakości)")
+        st.subheader("🥇 Tabela Wyników")
         rows = []
         for se in eval_report.per_scenario:
             ext = extra_metrics.get(se.scenario_name, {})
             costs = ext.get("costs", {})
-            wins = h2h_wins.get(se.scenario_name, 0)
+
+            recall_pct = ext.get("error_recall_pct", -1.0)
+            recall_str = "Brak danych" if recall_pct < 0 else f"{recall_pct}%"
 
             rows.append({
                 "Architektura / Model": se.scenario_name,
-                "⚔️ Wygrane H2H": wins,
                 "🏆 Jakość (0-50)": se.rubric_total,
                 "🎯 Odchylenie (RMSE)": ext.get("rmse", 0.0),
+                "🎯 Wykryte błędy (%)": recall_str,
                 "🔤 TPW (Narzut)": ext.get("tpw", 0.0),
-                "📦 Gęstość IN (zn/tok)": ext.get("density_in", 0.0),
-                "📦 Gęstość OUT (zn/tok)": ext.get("density_out", 0.0),
+                "📦 Gęst. Meryt. (zn/tok)": ext.get("factual_density", 0.0),
+                "📦 Gęst. Ling. (zn/tok)": ext.get("linguistic_density", 0.0),
+                "📦 Tokeny MAP": costs.get("prior_tokens_total", 0),
+                "📦 Hegemon IN": costs.get("hegemon_tokens_in", 0),
+                "📦 Hegemon OUT": costs.get("hegemon_tokens_out", 0),
                 "📉 Koszt MAP ($)": costs.get("map_total_usd", 0.0),
                 "📈 Koszt Hegemona ($)": costs.get("reduce_usd", 0.0),
-                "Osadzenie w faktach": se.rubric.groundedness,
-                "Konkretność rad": se.rubric.actionability,
-                "⚠️ Zagubienie w środku": ext.get("lost_in_middle", "NIE"),
+                "Osadzenie": se.rubric.groundedness,
+                "Wygrane H2H": h2h_wins.get(se.scenario_name, 0),  # Ukryta kolumna do sortowania
             })
 
         df = pd.DataFrame(rows)
         if not df.empty:
-            df = df.sort_values(by=["⚔️ Wygrane H2H", "🏆 Jakość (0-50)", "🎯 Odchylenie (RMSE)"],
+            df = df.sort_values(by=["Wygrane H2H", "🏆 Jakość (0-50)", "🎯 Odchylenie (RMSE)"],
                                 ascending=[False, False, True])
+            # Usuwamy H2H przed wyświetleniem, żeby nie śmieciło widoku
+            df = df.drop(columns=["Wygrane H2H"])
 
-            st.dataframe(
-                df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "🏆 Jakość (0-50)": st.column_config.NumberColumn(format="%d/50"),
-                    "🎯 Odchylenie (RMSE)": st.column_config.NumberColumn(
-                        help="Im mniejszy, tym model bliższy ocenie człowieka"),
-                    "📉 Koszt MAP ($)": st.column_config.NumberColumn(format="$%.5f"),
-                    "📈 Koszt Hegemona ($)": st.column_config.NumberColumn(format="$%.5f"),
-                    "🔤 TPW (Narzut)": st.column_config.NumberColumn(
-                        help="Ilość tokenów wejściowych zużywanych na jedno polskie słowo."),
-                    "📦 Gęstość IN (zn/tok)": st.column_config.NumberColumn(
-                        help="Ilość znaków na 1 token (wejście). Wyżej = lepiej/taniej zoptymalizowany model językowy."),
-                    "📦 Gęstość OUT (zn/tok)": st.column_config.NumberColumn(help="Ilość znaków na 1 token (wyjście).")
-                }
-            )
+            st.dataframe(df, hide_index=True, use_container_width=True, column_config={
+                "🏆 Jakość (0-50)": st.column_config.NumberColumn(format="%d/50"),
+                "📉 Koszt MAP ($)": st.column_config.NumberColumn(format="$%.5f"),
+                "📈 Koszt Hegemona ($)": st.column_config.NumberColumn(format="$%.5f")
+            })
 
-        # --- Δ vs. baseline ---
-        per = eval_report.per_scenario
-        if len(per) >= 2:
-            st.subheader("📐 Porównanie do bazy (Δ)")
-            st.caption(
-                "Wybierz scenariusz bazowy. Pozostałe pokazane jako RÓŻNICA względem niego (dodatnia jakość = lepiej).")
-            names = [se.scenario_name for se in per]
-            base_name = st.selectbox("Scenariusz bazowy:", options=names, index=0, key="ab_baseline")
-            base = next(se for se in per if se.scenario_name == base_name)
-            base_ext = extra_metrics.get(base_name, {})
-
-            delta_rows = []
-            for se in per:
-                if se.scenario_name == base_name:
-                    continue
-                ext = extra_metrics.get(se.scenario_name, {})
-                delta_rows.append({
-                    "Scenariusz": se.scenario_name,
-                    "Δ Jakość (0-50)": round(se.rubric_total - base.rubric_total, 1),
-                    "Δ Odchylenie (RMSE)": round(ext.get("rmse", 0.0) - base_ext.get("rmse", 0.0), 2),
-                    "Δ TPW": round(ext.get("tpw", 0.0) - base_ext.get("tpw", 0.0), 2),
-                    "Δ Koszt ($)": round(se.total_cost_usd - base.total_cost_usd, 5),
-                    "Δ Osadzenie": se.rubric.groundedness - base.rubric.groundedness,
-                    "Lost-in-middle": f"{base_ext.get('lost_in_middle', 'Brak danych')} → {ext.get('lost_in_middle', 'Brak danych')}",
-                })
-            if delta_rows:
-                st.dataframe(pd.DataFrame(delta_rows), hide_index=True, use_container_width=True)
-
-        st.subheader("🔎 Dowody sędziego (audyt osadzenia)")
-        st.caption(
-            "Sprawdź, DLACZEGO sędzia dał daną ocenę osadzenia — jego uzasadnienie oraz materiał, który widział.")
-        for se in per:
-            with st.expander(f"{se.scenario_name} — Osadzenie {se.rubric.groundedness}/10, "
-                             f"Trafność {se.rubric.correctness}/10"):
-                if se.rubric.justification:
-                    st.markdown(f"**Uzasadnienie sędziego:** {se.rubric.justification}")
-                if se.judge_evidence:
-                    st.text_area("Materiał przekazany sędziemu", se.judge_evidence, height=300,
-                                 key=f"evidence_{se.scenario_name}")
-                else:
-                    st.info("Brak zapisanego materiału dowodowego.")
-
-        st.caption(
-            f"Tokeny zużyte przez sędziego do oceny: {eval_report.judge_tokens_in + eval_report.judge_tokens_out}."
-        )
-        eval_gateway.reset_session_telemetry()
+        st.subheader("🔎 Dowody sędziego (Audyt Ugruntowania)")
+        for se in eval_report.per_scenario:
+            with st.expander(f"{se.scenario_name} — Osadzenie {se.rubric.groundedness}/10"):
+                st.markdown(f"**Uzasadnienie (Wykrywalność błędów):**\n\n{se.rubric.justification}")
 
 # =========================================================================
 # SEKCJA: WGRAJ ZAPISANE RAPORTY I OCEŃ SĘDZIĄ (cross-session compare)
 # =========================================================================
 st.divider()
 st.header("📤 Wgraj zapisane raporty do porównania sędzią")
-st.caption(
-    "Wczytaj pliki JSON pobrane wcześniej (raport pojedynczy, wsad, lub RunResult) — z różnych sesji — "
-    "i oceń je razem jednym sędzią. Porównuj tylko raporty z TEGO SAMEGO wystąpienia."
-)
 
-uploaded_reports = st.file_uploader(
-    "Pliki JSON raportów (możesz wybrać wiele):", type="json", accept_multiple_files=True, key="judge_upload"
-)
+uploaded_reports = st.file_uploader("Pliki JSON raportów:", type="json", accept_multiple_files=True, key="judge_upload")
 up_judge_model = st.selectbox("Model sędziego:", options=Config.get_all_models(), index=0, key="upload_judge_model")
 up_judge_cfg = _judge_config_controls("upload")
 
 col_up1, col_up2, col_up3 = st.columns(3)
-with col_up1:
-    up_exp_factual = st.slider("Oczekiwana Merytoryka (Upload)", 0.0, 100.0, 70.0, 0.5)
-with col_up2:
-    up_exp_linguistic = st.slider("Oczekiwany Język (Upload)", 0.0, 100.0, 30.0, 0.5)
-with col_up3:
-    up_total_words = st.number_input("Suma słów w nagraniu (dla TPW)", min_value=0, value=5000)
+with col_up1: up_exp_factual = st.slider("Oczekiwana Merytoryka (Upload)", 0.0, 100.0, 70.0, 0.5)
+with col_up2: up_exp_linguistic = st.slider("Oczekiwany Język (Upload)", 0.0, 100.0, 30.0, 0.5)
+with col_up3: up_total_words = st.number_input("Suma słów w nagraniu (dla TPW)", min_value=0, value=5000)
 
-up_excerpt = st.text_area(
-    "Fragment transkrypcji dla osadzenia (opcjonalnie — wklej treść wystąpienia):", value="", height=150,
-    key="upload_excerpt",
-    help="Bez tego sędzia ocenia jakość raportów, ale nie może zweryfikować ich zgodności z transkrypcją."
-)
+st.subheader("📁 Pliki referencyjne błędów (JSON Golden Sets) dla Uploadu")
+col_uf1, col_uf2 = st.columns(2)
+with col_uf1: up_golden_factual_file = st.file_uploader("Złoty Wzorzec MERYTORYCZNY (JSON)", type=["json"],
+                                                        key="upload_factual")
+with col_uf2: up_golden_linguistic_file = st.file_uploader("Złoty Wzorzec LINGWISTYCZNY (JSON)", type=["json"],
+                                                           key="upload_linguistic")
+
+up_excerpt = st.text_area("Fragment transkrypcji:", value="", height=100, key="upload_excerpt")
 
 if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_uploaded"):
     parsed = []
     for f in uploaded_reports:
         try:
             content = f.getvalue().decode("utf-8")
-        except Exception:
+        except:
             content = f.read().decode("utf-8", errors="ignore")
         got = _reports_from_uploaded_json(content, f.name)
-        if not got:
-            st.warning(f"Pominięto `{f.name}` — nie rozpoznano formatu (oczekiwano FinalReport/RunResult/BatchExport).")
-        parsed.extend(got)
+        if got: parsed.extend(got)
 
-    if len(parsed) < 1:
-        st.error("Brak poprawnych raportów do oceny.")
-    else:
+    if parsed:
         reports = {}
         for label, rep in parsed:
             uniq = label
@@ -1096,20 +624,17 @@ if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_upload
                 uniq = f"{label} #{i}"
                 i += 1
             reports[uniq] = rep
-        st.info(f"Wczytano {len(reports)} raportów: {', '.join(reports.keys())}")
 
         with st.spinner("Sędzia ocenia wgrane raporty..."):
-            up_gateway = LLMGateway(ObservabilityManager())
-            up_engine = EvaluationEngine(up_gateway, up_judge_model, **up_judge_cfg)
+            up_txt_factual = read_golden_set(up_golden_factual_file)
+            up_txt_linguistic = read_golden_set(up_golden_linguistic_file)
+
+            up_engine = EvaluationEngine(LLMGateway(ObservabilityManager()), up_judge_model, **up_judge_cfg)
             up_eval, up_extra_metrics = asyncio.run(up_engine.evaluate(
-                transcript_excerpt=up_excerpt,
-                reports=reports,
-                duration_sec=0.0,
-                total_words=up_total_words,
-                expected_factual=up_exp_factual,
-                expected_linguistic=up_exp_linguistic
+                transcript_excerpt=up_excerpt, reports=reports, duration_sec=0.0,
+                total_words=up_total_words, expected_factual=up_exp_factual, expected_linguistic=up_exp_linguistic,
+                golden_factual=up_txt_factual, golden_linguistic=up_txt_linguistic
             ))
-            up_gateway.reset_session_telemetry()
 
         up_h2h_wins = {name: 0 for name in reports.keys()}
         if up_eval.pairwise:
@@ -1122,26 +647,34 @@ if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_upload
             ext = up_extra_metrics.get(se.scenario_name, {})
             costs = ext.get("costs", {})
 
+            recall_pct = ext.get("error_recall_pct", -1.0)
+            recall_str = "Brak danych" if recall_pct < 0 else f"{recall_pct}%"
+
             rows.append({
                 "Raport": se.scenario_name,
-                "⚔️ Wygrane H2H": up_h2h_wins.get(se.scenario_name, 0),
-                "Jakość (0-50)": se.rubric_total,
-                "Odchylenie (RMSE)": ext.get("rmse", 0.0),
-                "TPW (Podatek)": ext.get("tpw", 0.0),
-                "Gęstość IN (zn/tok)": ext.get("density_in", 0.0),
-                "Gęstość OUT (zn/tok)": ext.get("density_out", 0.0),
-                "Koszt MAP ($)": costs.get("map_total_usd", 0.0),
-                "Koszt Hegemona ($)": costs.get("reduce_usd", 0.0),
+                "🏆 Jakość (0-50)": se.rubric_total,
+                "🎯 Odchylenie (RMSE)": ext.get("rmse", 0.0),
+                "🎯 Wykryte błędy (%)": recall_str,
+                "🔤 TPW (Narzut)": ext.get("tpw", 0.0),
+                "📦 Gęst. Meryt. (zn/tok)": ext.get("factual_density", 0.0),
+                "📦 Gęst. Ling. (zn/tok)": ext.get("linguistic_density", 0.0),
+                "📦 Tokeny MAP": costs.get("prior_tokens_total", 0),
+                "📦 Hegemon IN": costs.get("hegemon_tokens_in", 0),
+                "📦 Hegemon OUT": costs.get("hegemon_tokens_out", 0),
+                "📉 Koszt MAP ($)": costs.get("map_total_usd", 0.0),
+                "📈 Koszt Hegemona ($)": costs.get("reduce_usd", 0.0),
                 "Osadzenie": se.rubric.groundedness,
-                "Zagubienie w środku": ext.get("lost_in_middle", "NIE"),
+                "Wygrane H2H": up_h2h_wins.get(se.scenario_name, 0),
             })
 
         df_up = pd.DataFrame(rows)
         if not df_up.empty:
-            df_up = df_up.sort_values(by=["⚔️ Wygrane H2H", "Jakość (0-50)", "Odchylenie (RMSE)"],
+            df_up = df_up.sort_values(by=["Wygrane H2H", "🏆 Jakość (0-50)", "🎯 Odchylenie (RMSE)"],
                                       ascending=[False, False, True])
+            df_up = df_up.drop(columns=["Wygrane H2H"])
             st.dataframe(df_up, hide_index=True, use_container_width=True)
 
-        st.caption(
-            f"Tokeny sędziego: {up_eval.judge_tokens_in + up_eval.judge_tokens_out}. {up_eval.summary}"
-        )
+        st.subheader("🔎 Dowody sędziego i Analiza Błędów")
+        for se in up_eval.per_scenario:
+            with st.expander(f"{se.scenario_name} — Osadzenie {se.rubric.groundedness}/10"):
+                st.markdown(f"**Uzasadnienie (Tabela wyłapanych błędów):**\n\n{se.rubric.justification}")

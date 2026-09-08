@@ -1,6 +1,7 @@
 import itertools
 import math
 import re
+import json
 from typing import Dict, Tuple, List, Any
 
 from core.config_loader import Config
@@ -10,17 +11,16 @@ from models.schemas import (
 
 _REGIONS = 3  # start / middle / end
 
-# Regex obsługujący zarówno format minutowy [12:34] jak i sekundowy z telemetrii np. [1550.704s] lub [112.8s]
+# Regex obsługujący format minutowy [12:34] jak i sekundowy [1550.704s]
 _TS_RE_MIN = re.compile(r"\[(\d{1,2}):(\d{2})\]")
 _TS_RE_SEC = re.compile(r"\[(\d+(?:\.\d+)?)[sS]\]")
 
 
 class EvaluationEngine:
     """
-    Tier 1 (absolute rubric) + Tier 2 (pairwise preference) LLM-as-judge over multiple
-    scenario reports produced for the SAME input. Judge calls go through the gateway so
-    their tokens/cost are measured too. Also aggregates telemetry and token density
-    (chars/token) per scenario — useful for comparing Polish vs. English small models.
+    Tier 1 LLM-as-judge. Ocenianie względem Złotego Wzorca (plik JSON z błędami).
+    Wylicza błędy MSE, gęstość tokenów na agenta, oraz precyzyjny procent wykrytych
+    błędów krytycznych (Recall) na podstawie Golden Setu.
     """
 
     def __init__(self, gateway, judge_model: str,
@@ -51,50 +51,64 @@ class EvaluationEngine:
 
     @staticmethod
     def _calculate_language_tax(report: FinalReport, total_words: int) -> float:
-        """
-        Oblicza wskaźnik Tokens-Per-Word (TPW) dla fazy Map (wejście).
-        Udowadnia 'Podatek Językowy' dla polskiego tekstu.
-        """
         if not total_words or total_words == 0:
             return 0.0
 
         details = report.telemetry.phase_details if report.telemetry and report.telemetry.phase_details else []
         map_tokens_in = sum(
             p.tokens_in for p in details
-            if "reduce" not in p.agent_role.lower() and "hegemon" not in p.agent_role.lower() and "evaluator" not in p.agent_role.lower()
+            if
+            "reduce" not in p.agent_role.lower() and "hegemon" not in p.agent_role.lower() and "evaluator" not in p.agent_role.lower()
         )
         return round(map_tokens_in / total_words, 2)
 
     @staticmethod
+    def _phase_densities(report: FinalReport) -> dict:
+        details = report.telemetry.phase_details if report.telemetry and report.telemetry.phase_details else []
+
+        def calc(role_kw: str):
+            pc = sum(p.prompt_chars for p in details if role_kw in p.agent_role.lower())
+            tin = sum(p.tokens_in for p in details if role_kw in p.agent_role.lower())
+            return round(pc / tin, 2) if tin > 0 else 0.0
+
+        return {
+            "factual_density": calc("factual"),
+            "linguistic_density": calc("linguistic"),
+            "reduce_density": calc("reduce") or calc("hegemon")
+        }
+
+    @staticmethod
     def _split_phase_telemetry(report: FinalReport) -> dict:
-        """
-        Rozbija koszty i tokeny na poszczególne ramy architektoniczne (Map vs Reduce).
-        """
         details = report.telemetry.phase_details if report.telemetry and report.telemetry.phase_details else []
 
         map_cost = 0.0
         reduce_cost = 0.0
+        prior_tokens_total = 0
+        hegemon_tokens_in = 0
+        hegemon_tokens_out = 0
 
         for p in details:
             role = p.agent_role.lower()
             if "reduce" in role or "hegemon" in role or "got " in role:
                 reduce_cost += p.cost_usd
+                hegemon_tokens_in += p.tokens_in
+                hegemon_tokens_out += p.tokens_out
             elif "evaluator" in role or "judge" in role:
                 pass
             else:
                 map_cost += p.cost_usd
+                prior_tokens_total += (p.tokens_in + p.tokens_out)
 
         return {
             "map_total_usd": round(map_cost, 5),
-            "reduce_usd": round(reduce_cost, 5)
+            "reduce_usd": round(reduce_cost, 5),
+            "prior_tokens_total": prior_tokens_total,
+            "hegemon_tokens_in": hegemon_tokens_in,
+            "hegemon_tokens_out": hegemon_tokens_out
         }
 
     @staticmethod
     def _calculate_alignment_error(report: FinalReport, exp_factual: float, exp_linguistic: float) -> float:
-        """
-        Zwraca RMSE (Root Mean Square Error) - średnie odchylenie w punktach (0-100),
-        co jest czytelne dla człowieka (np. 'pomylił się średnio o 12 punktów').
-        """
         if not report.scorecard or report.scorecard.factual_score is None or report.scorecard.linguistic_score is None:
             return 0.0
 
@@ -103,6 +117,51 @@ class EvaluationEngine:
 
         mse = (math.pow(factual_diff, 2) + math.pow(ling_diff, 2)) / 2
         return round(math.sqrt(mse), 1)
+
+    @staticmethod
+    def _calculate_error_recall(golden_json_str: str, report_timestamps: List[float],
+                                tolerance_sec: float = 90.0) -> float:
+        """
+        Parsuje Golden Set JSON, wyciąga błędy o skali HIGH/CRITICAL, i sprawdza,
+        czy oceniany raport wyłapał znaczniki czasu w pobliżu tych błędów.
+        Zwraca procent wykrycia (0-100) lub -1.0 jeśli brak danych/błędny JSON.
+        """
+        if not golden_json_str.strip():
+            return -1.0
+
+        try:
+            data = json.loads(golden_json_str)
+            target_ts = []
+
+            def extract_ts(obj):
+                if isinstance(obj, dict):
+                    scale = str(obj.get("scale", obj.get("severity", ""))).upper()
+                    if scale in ["HIGH", "CRITICAL", "WYSOKA", "KRYTYCZNA"]:
+                        t = obj.get("time", obj.get("czas"))
+                        if t is not None:
+                            try:
+                                target_ts.append(float(t))
+                            except ValueError:
+                                pass
+                    for k, v in obj.items():
+                        extract_ts(v)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        extract_ts(item)
+
+            extract_ts(data)
+
+            if not target_ts:
+                return -1.0
+
+            caught = 0
+            for t_target in target_ts:
+                if any(abs(t_target - t_rep) <= tolerance_sec for t_rep in report_timestamps):
+                    caught += 1
+
+            return round((caught / len(target_ts)) * 100, 2)
+        except Exception:
+            return -1.0
 
     @staticmethod
     def build_grounding_excerpt(transcript: str, total_chars: int = None, regions: int = None) -> str:
@@ -173,16 +232,6 @@ class EvaluationEngine:
         return "\n\n".join(probes)
 
     @staticmethod
-    def _density(report: FinalReport) -> Tuple[float, float]:
-        pc = sum(p.prompt_chars for p in report.telemetry.phase_details) if report.telemetry.phase_details else 0
-        rc = sum(p.response_chars for p in report.telemetry.phase_details) if report.telemetry.phase_details else 0
-        tin = report.telemetry.total_tokens_in
-        tout = report.telemetry.total_tokens_out
-        in_density = round(pc / tin, 2) if tin else 0.0
-        out_density = round(rc / tout, 2) if tout else 0.0
-        return in_density, out_density
-
-    @staticmethod
     def _parsed_timestamps(report: FinalReport) -> List[float]:
         text = "\n".join([
             report.analysis.factual_summary,
@@ -198,10 +247,8 @@ class EvaluationEngine:
         ts = []
         for m in _TS_RE_MIN.finditer(text):
             ts.append(float(m.group(1)) * 60 + float(m.group(2)))
-
         for m in _TS_RE_SEC.finditer(text):
             ts.append(float(m.group(1)))
-
         return ts
 
     @staticmethod
@@ -240,23 +287,6 @@ class EvaluationEngine:
         return out
 
     @staticmethod
-    def _lost_in_middle(curve: List[float]) -> str:
-        """
-        Zwraca string dla UI: 'Brak danych' (jeśli model nie podał znaczników),
-        'TAK' (jeśli zgubił środek), 'NIE' (jeśli pokrył równomiernie).
-        """
-        if not curve or sum(curve) == 0:
-            return "Brak danych"
-
-        if len(curve) < 3:
-            return "NIE"
-
-        edges = (curve[0] + curve[-1]) / 2
-        if curve[len(curve) // 2] < 0.5 * edges and edges > 0:
-            return "TAK"
-        return "NIE"
-
-    @staticmethod
     def _normalize_winner(raw: str, name_a: str, name_b: str) -> str:
         r = (raw or "").strip().upper()
         if "TIE" in r or "REMIS" in r:
@@ -268,34 +298,46 @@ class EvaluationEngine:
         return "UNCLEAR"
 
     async def _judge_absolute(self, transcript_excerpt: str, scenario_name: str,
-                              report: FinalReport, probes: str = "") -> JudgeRubric:
+                              report: FinalReport, probes: str = "",
+                              golden_factual: str = "", golden_linguistic: str = "") -> JudgeRubric:
         ground_truth = self._ground_truth_findings(report)
         ground_block = f"\n<USTALENIA PIPELINE (kotwica do weryfikacji groundedness)>\n{ground_truth}\n" if ground_truth else ""
         probe_block = (
-            f"\n<SONDY CZASOWE — transkrypcja przy znacznikach [MM:SS] lub [SS.s] cytowanych w raporcie>\n{probes}\n"
+            f"\n<SONDY CZASOWE — transkrypcja przy znacznikach cytowanych w raporcie>\n{probes}\n"
             if probes else ""
         )
         focus_block = (
             f"\n<SZCZEGÓLNY NACISK OD UŻYTKOWNIKA>\n{self.focus_instruction}\n"
             if self.focus_instruction else ""
         )
-        prompt = f"""Jesteś surowym sędzią jakości feedbacku mentorskiego dla wystąpień publicznych.
-Oceniasz JAKOŚĆ poniższego raportu (nie samo wystąpienie).
 
-<FRAGMENT TRANSKRYPCJI — wiele regionów: początek/środek/koniec>
+        golden_block = ""
+        if golden_factual or golden_linguistic:
+            golden_block = "\n<ZŁOTY WZORZEC (GOLDEN SET) - OCZEKIWANE BŁĘDY DO WYKRYCIA>\n"
+            if golden_factual:
+                golden_block += f"--- BŁĘDY MERYTORYCZNE ---\n{golden_factual}\n\n"
+            if golden_linguistic:
+                golden_block += f"--- BŁĘDY LINGWISTYCZNE ---\n{golden_linguistic}\n\n"
+
+        prompt = f"""Jesteś surowym ekspertem MLOps i sędzią (LLM-as-a-Judge) jakości systemów AI.
+Oceniasz JAKOŚĆ poniższego raportu z analizy przemówienia.
+
+{golden_block}
+<FRAGMENT TRANSKRYPCJI — opcjonalny kontekst>
 {transcript_excerpt}
 {ground_block}{probe_block}{focus_block}
+
 <RAPORT DO OCENY (scenariusz: {scenario_name})>
 {self._report_text(report)}
 
 ZASADY OCENY:
-1. Groundedness (Ugruntowanie): Sprawdź, czy twierdzenia raportu mają DOKŁADNE POKRYCIE w powyższych fragmentach transkrypcji. Surowo karz za halucynacje.
-2. Positional Recall (Sondy Czasowe): Masz fragmenty z miejsc zacytowanych w raporcie. Jeśli raport nie cytuje błędów z całego nagrania (ze ŚRODKA i KOŃCA) lub wnioski w sondach są zmyślone - drastycznie tnij ocenę.
-3. Tool Adherence (Lenistwo): Jeśli raport dotyczy scenariusza z RAG/WEB, sprawdź czy kategorycznie odrzuca kłamstwa. Jeśli model "zgaduje" lub asekuruje się statusem UNVERIFIED dla oczywistych bzdur - karz za lenistwo narzędziowe.
-4. Vague Praise vs Actionability: Policz konkretne rady. Jeśli raport "leje wodę" ("musisz pracować nad dynamiką"), obniż Actionability do minimum. Wymagaj bezwzględnego wskazywania błędów z markerami czasu.
+1. Tabela Wykrywalności (KRYTYCZNE): W swoim uzasadnieniu wygeneruj krótką tabelę Markdown. Zestaw w niej duże i krytyczne błędy z pliku ZŁOTY WZORZEC (jeśli podano) z tym, co raport FAKTYCZNIE wykrył. Tabela ma mieć kolumny: | Błąd ze Złotego Wzorca | Oczekiwany Czas | Czy raport go wyłapał? |. Jeśli raport pominął usterki z dalszej części wykładu, tnij ocenę Groundedness i Actionability.
+2. Groundedness (Ugruntowanie): Karz za halucynacje. Jeśli raport zmyśla wnioski, na które nie ma dowodów, obniż ocenę.
+3. Tool Adherence: W scenariuszach z RAG/WEB model musi kategorycznie odrzucać kłamstwa. Karz za lenistwo (asekurowanie się statusem UNVERIFIED dla jawnych kłamstw historycznych).
+4. Actionability vs Vague Praise: Policz konkretne rady. "Lanie wody" bez podawania konkretnych [MM:SS] to ocena minimalna.
 
 Oceń raport w 5 wymiarach 0-10 (actionability, specificity, correctness, tone, groundedness)
-i podaj krótkie uzasadnienie. Zwróć wynik zgodnie ze schematem."""
+i podaj uzasadnienie (wraz z Tabelą Błędów). Zwróć wynik zgodnie ze schematem."""
         return await self.gateway.execute_structured(
             prompt=prompt,
             schema_class=JudgeRubric,
@@ -308,18 +350,7 @@ i podaj krótkie uzasadnienie. Zwróć wynik zgodnie ze schematem."""
                               name_b: str, report_b: FinalReport) -> PairwisePreference:
         prompt = f"""Jesteś sędzią porównującym dwa raporty mentorskie dla TEGO SAMEGO wystąpienia.
 Wybierz, który jest BARDZIEJ UŻYTECZNY dla prelegenta (konkretność, trafność, ton, brak halucynacji).
-
-<FRAGMENT TRANSKRYPCJI>
-{transcript_excerpt}
-
-<RAPORT A ({name_a})>
-{self._report_text(report_a)}
-
-<RAPORT B ({name_b})>
-{self._report_text(report_b)}
-
-W polu 'winner' wpisz DOKŁADNIE "{name_a}" lub "{name_b}", albo "TIE". Podaj krótki 'reason'.
-NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użyteczność, konkretność i trafność dla prelegenta."""
+W polu 'winner' wpisz DOKŁADNIE "{name_a}" lub "{name_b}", albo "TIE"."""
         return await self.gateway.execute_structured(
             prompt=prompt,
             schema_class=PairwisePreference,
@@ -332,7 +363,9 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
                        duration_sec: float = 0.0,
                        total_words: int = 0,
                        expected_factual: float = 70.0,
-                       expected_linguistic: float = 30.0) -> Tuple[EvaluationReport, Dict[str, dict]]:
+                       expected_linguistic: float = 30.0,
+                       golden_factual: str = "",
+                       golden_linguistic: str = "") -> Tuple[EvaluationReport, Dict[str, dict]]:
 
         result = EvaluationReport()
         extra_metrics = {}
@@ -344,40 +377,44 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
             try:
                 probes = self.build_timestamp_probes(report, transcript_excerpt, duration_sec,
                                                      self.probe_timestamps, self.probe_window_chars)
-                rubric = await self._judge_absolute(grounded_excerpt, name, report, probes=probes)
+                rubric = await self._judge_absolute(grounded_excerpt, name, report, probes=probes,
+                                                    golden_factual=golden_factual, golden_linguistic=golden_linguistic)
             except Exception as e:
                 rubric = JudgeRubric(justification=f"[Sędzia zawiódł: {e}]")
 
             total = rubric.actionability + rubric.specificity + rubric.correctness + rubric.tone + rubric.groundedness
-            in_density, out_density = self._density(report)
             pos_recall = self.positional_recall(report, duration_sec)
             red_fidelity = self.reduce_fidelity(report, duration_sec)
+
+            report_ts = self._parsed_timestamps(report)
+            error_recall_pct = -1.0
+
+            # Ewaluacja wykrywalności jeśli wgrano JSON z merytoryką
+            if golden_factual.strip() and golden_factual.strip().startswith("{"):
+                error_recall_pct = self._calculate_error_recall(golden_factual, report_ts)
 
             phase_costs = self._split_phase_telemetry(report)
             tpw = self._calculate_language_tax(report, total_words)
             alignment_error = self._calculate_alignment_error(report, expected_factual, expected_linguistic)
-            lost_in_middle_str = self._lost_in_middle(pos_recall)
+            densities = self._phase_densities(report)
 
             extra_metrics[name] = {
                 "rmse": alignment_error,
                 "tpw": tpw,
                 "costs": phase_costs,
-                "lost_in_middle": lost_in_middle_str,
-                "pos_recall_raw": pos_recall,
-                "density_in": in_density,
-                "density_out": out_density
+                "error_recall_pct": error_recall_pct,
+                "factual_density": densities.get("factual_density", 0.0),
+                "linguistic_density": densities.get("linguistic_density", 0.0),
+                "reduce_density": densities.get("reduce_density", 0.0)
             }
 
             ground_truth = self._ground_truth_findings(report)
             evidence = (
-                f"=== FRAGMENTY TRANSKRYPCJI (start/środek/koniec) ===\n{grounded_excerpt}\n\n"
+                f"=== ZŁOTY WZORZEC MERYTORYCZNY ===\n{golden_factual or '(brak)'}\n\n"
+                f"=== ZŁOTY WZORZEC LINGWISTYCZNY ===\n{golden_linguistic or '(brak)'}\n\n"
                 f"=== USTALENIA PIPELINE ===\n{ground_truth or '(brak)'}\n\n"
-                f"=== SONDY CZASOWE ===\n{probes or '(brak — raport nie cytował znaczników [MM:SS])'}"
+                f"=== SONDY CZASOWE ===\n{probes or '(brak)'}"
             )
-
-            # Bezpieczne dla Pydantic: wysyłamy tylko bool, a interfejs w app.py odczyta stringa z extra_metrics.
-            # Zabezpiecza to przed ValidationError.
-            safe_bool_flag = (lost_in_middle_str == "TAK")
 
             result.per_scenario.append(ScenarioEvaluation(
                 scenario_name=name,
@@ -387,11 +424,11 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
                 total_tokens_out=report.telemetry.total_tokens_out,
                 total_cost_usd=report.telemetry.total_cost_usd,
                 total_time_s=report.telemetry.total_time_s,
-                input_token_density=in_density,
-                output_token_density=out_density,
+                input_token_density=0.0,
+                output_token_density=0.0,
                 positional_recall=pos_recall,
                 reduce_fidelity=red_fidelity,
-                lost_in_middle_flag=safe_bool_flag,
+                lost_in_middle_flag=False,
                 judge_evidence=evidence,
             ))
 
@@ -410,9 +447,6 @@ NIE nagradzaj rozwlekłości ani długości — oceniaj wyłącznie użytecznoś
 
         if result.per_scenario:
             best = max(result.per_scenario, key=lambda s: s.rubric_total)
-            result.summary = (
-                f"Najwyższa ocena jakości: {best.scenario_name} ({best.rubric_total}/50). "
-                f"Porównaj z kosztem tokenowym każdego scenariusza w tabeli."
-            )
+            result.summary = f"Sędzia (Hegemon): Najwyższa ocena {best.scenario_name} ({best.rubric_total}/50)."
 
         return result, extra_metrics
