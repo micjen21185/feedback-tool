@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from core.batch_runner import run_batch, scenarios_for_batch
 from core.config_loader import Config
-from core.llm_gateway import LLMGateway, check_ollama_models
+from core.llm_gateway import LLMGateway
 from core.pipelines.evaluation_engine import EvaluationEngine
 from core.pipelines.orchestrator import Orchestrator
 from models.schemas import (
@@ -545,17 +545,33 @@ else:
 
             recall_pct = ext.get("error_recall_pct", -1.0)
             recall_str = "Brak danych" if recall_pct < 0 else f"{recall_pct}%"
+            crit_pct = ext.get("error_recall_critical_pct", -1.0)
+            crit_str = "—" if crit_pct is None or crit_pct < 0 else f"{crit_pct}%"
+
+            actual_model = ext.get("actual_hegemon_model", "") or costs.get("actual_hegemon_model", "")
+            actual_short = actual_model.split("/")[-1] if actual_model else "—"
+            fb_used = ext.get("fallback_used", False)
+            model_cell = f"⚠️ {actual_short} (fallback)" if fb_used else actual_short
+
+            missing = ext.get("missing_sections", [])
+            miss_cell = "✓ komplet" if not missing else f"⚠️ brak: {', '.join(missing)}"
+            lim_cell = "⚠️ TAK" if ext.get("lost_in_middle") else "—"
 
             rows.append({
                 "Architektura / Model": se.scenario_name,
+                "🤖 Model (faktyczny)": model_cell,
+                "🧩 Typ": ext.get("scenario_kind", ""),
                 "🏆 Jakość (0-50)": se.rubric_total,
+                "🧾 Kompletność": miss_cell,
+                "🕳️ Lost-in-middle": lim_cell,
                 "🎯 Odchylenie (RMSE)": ext.get("rmse", 0.0),
                 "🎯 Wykryte błędy (%)": recall_str,
+                "🎯 CRIT/HIGH (%)": crit_str,
                 "🔤 TPW (Narzut)": ext.get("tpw", 0.0),
                 "📦 Gęst. Meryt. (zn/tok)": ext.get("factual_density", 0.0),
                 "📦 Gęst. Ling. (zn/tok)": ext.get("linguistic_density", 0.0),
                 "📦 Tokeny MAP": costs.get("prior_tokens_total", 0),
-                "📦 Hegemon IN": costs.get("hegemon_tokens_in", 0),
+                "📦 Hegemon IN (max)": costs.get("hegemon_tokens_in", 0),
                 "📦 Hegemon OUT": costs.get("hegemon_tokens_out", 0),
                 "📉 Koszt MAP ($)": costs.get("map_total_usd", 0.0),
                 "📈 Koszt Hegemona ($)": costs.get("reduce_usd", 0.0),
@@ -591,10 +607,51 @@ uploaded_reports = st.file_uploader("Pliki JSON raportów:", type="json", accept
 up_judge_model = st.selectbox("Model sędziego:", options=Config.get_all_models(), index=0, key="upload_judge_model")
 up_judge_cfg = _judge_config_controls("upload")
 
-col_up1, col_up2, col_up3 = st.columns(3)
+st.subheader("📝 Pełna transkrypcja i metadane (dla groundedness, sond czasowych i lost-in-the-middle)")
+st.caption("Wgraj CAŁĄ transkrypcję (full_raw_text.txt) — sędzia dostanie z niej wieloregionowy fragment "
+           "i sondy czasowe. Metadane (metadata.json) dostarczą liczbę słów i czas trwania automatycznie, "
+           "więc nie trzeba wpisywać ich ręcznie.")
+col_tx1, col_tx2 = st.columns(2)
+with col_tx1:
+    up_transcript_file = st.file_uploader("Pełna transkrypcja (.txt)", type=["txt"], key="upload_transcript_file")
+with col_tx2:
+    up_metadata_file = st.file_uploader("Metadane nagrania (metadata.json)", type=["json"], key="upload_metadata_file")
+
+# Metadane: automatyczne total_words i duration (zastępują ręczne pola).
+_up_meta = {}
+if up_metadata_file is not None:
+    try:
+        _up_meta = json.loads(up_metadata_file.getvalue().decode("utf-8"))
+    except Exception as e:
+        st.warning(f"Nie udało się odczytać metadata.json: {e}")
+
+# Transkrypcja: preferuj wgrany plik, w ostateczności pole tekstowe poniżej.
+up_transcript_text = ""
+if up_transcript_file is not None:
+    try:
+        up_transcript_text = up_transcript_file.getvalue().decode("utf-8", errors="ignore")
+        st.success(f"Wczytano transkrypcję: {len(up_transcript_text)} znaków.")
+    except Exception as e:
+        st.warning(f"Nie udało się odczytać transkrypcji: {e}")
+
+col_up1, col_up2 = st.columns(2)
 with col_up1: up_exp_factual = st.slider("Oczekiwana Merytoryka (Upload)", 0.0, 100.0, 70.0, 0.5)
 with col_up2: up_exp_linguistic = st.slider("Oczekiwany Język (Upload)", 0.0, 100.0, 30.0, 0.5)
-with col_up3: up_total_words = st.number_input("Suma słów w nagraniu (dla TPW)", min_value=0, value=5000)
+
+# total_words / duration: z metadanych, jeśli są; inaczej policz ze wgranej transkrypcji;
+# ręczne pole pojawia się TYLKO jako fallback, gdy brak obu źródeł.
+_meta_words = int(_up_meta.get("total_words", 0) or 0)
+_meta_dur = float(_up_meta.get("total_duration_sec", 0.0) or 0.0)
+if _meta_words:
+    up_total_words = _meta_words
+elif up_transcript_text:
+    up_total_words = len(up_transcript_text.split())
+else:
+    up_total_words = st.number_input("Suma słów w nagraniu (fallback dla TPW — brak metadata.json)",
+                                     min_value=0, value=0)
+up_duration_sec = _meta_dur  # 0.0 gdy brak — sondy/positional recall wtedy nieaktywne
+st.caption(f"Do obliczeń: słowa = **{up_total_words}**, czas = **{up_duration_sec:.0f}s** "
+           f"({'z metadata.json' if _meta_words else ('policzone z transkrypcji' if up_transcript_text else 'brak — podaj ręcznie')}).")
 
 st.subheader("📁 Pliki referencyjne błędów (JSON Golden Sets) dla Uploadu")
 col_uf1, col_uf2 = st.columns(2)
@@ -603,7 +660,9 @@ with col_uf1: up_golden_factual_file = st.file_uploader("Złoty Wzorzec MERYTORY
 with col_uf2: up_golden_linguistic_file = st.file_uploader("Złoty Wzorzec LINGWISTYCZNY (JSON)", type=["json"],
                                                            key="upload_linguistic")
 
-up_excerpt = st.text_area("Fragment transkrypcji:", value="", height=100, key="upload_excerpt")
+up_excerpt_box = st.text_area("Fragment transkrypcji (użyty tylko, gdy nie wgrano pliku .txt powyżej):",
+                              value="", height=100, key="upload_excerpt")
+up_excerpt = up_transcript_text or up_excerpt_box
 
 if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_uploaded"):
     parsed = []
@@ -631,7 +690,7 @@ if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_upload
 
             up_engine = EvaluationEngine(LLMGateway(ObservabilityManager()), up_judge_model, **up_judge_cfg)
             up_eval, up_extra_metrics = asyncio.run(up_engine.evaluate(
-                transcript_excerpt=up_excerpt, reports=reports, duration_sec=0.0,
+                transcript_excerpt=up_excerpt, reports=reports, duration_sec=up_duration_sec,
                 total_words=up_total_words, expected_factual=up_exp_factual, expected_linguistic=up_exp_linguistic,
                 golden_factual=up_txt_factual, golden_linguistic=up_txt_linguistic
             ))
@@ -649,17 +708,33 @@ if uploaded_reports and st.button("🔍 Oceń wgrane raporty", key="judge_upload
 
             recall_pct = ext.get("error_recall_pct", -1.0)
             recall_str = "Brak danych" if recall_pct < 0 else f"{recall_pct}%"
+            crit_pct = ext.get("error_recall_critical_pct", -1.0)
+            crit_str = "—" if crit_pct is None or crit_pct < 0 else f"{crit_pct}%"
+
+            actual_model = ext.get("actual_hegemon_model", "") or costs.get("actual_hegemon_model", "")
+            actual_short = actual_model.split("/")[-1] if actual_model else "—"
+            fb_used = ext.get("fallback_used", False)
+            model_cell = f"⚠️ {actual_short} (fallback)" if fb_used else actual_short
+
+            missing = ext.get("missing_sections", [])
+            miss_cell = "✓ komplet" if not missing else f"⚠️ brak: {', '.join(missing)}"
+            lim_cell = "⚠️ TAK" if ext.get("lost_in_middle") else "—"
 
             rows.append({
                 "Raport": se.scenario_name,
+                "🤖 Model (faktyczny)": model_cell,
+                "🧩 Typ": ext.get("scenario_kind", ""),
                 "🏆 Jakość (0-50)": se.rubric_total,
+                "🧾 Kompletność": miss_cell,
+                "🕳️ Lost-in-middle": lim_cell,
                 "🎯 Odchylenie (RMSE)": ext.get("rmse", 0.0),
                 "🎯 Wykryte błędy (%)": recall_str,
+                "🎯 CRIT/HIGH (%)": crit_str,
                 "🔤 TPW (Narzut)": ext.get("tpw", 0.0),
                 "📦 Gęst. Meryt. (zn/tok)": ext.get("factual_density", 0.0),
                 "📦 Gęst. Ling. (zn/tok)": ext.get("linguistic_density", 0.0),
                 "📦 Tokeny MAP": costs.get("prior_tokens_total", 0),
-                "📦 Hegemon IN": costs.get("hegemon_tokens_in", 0),
+                "📦 Hegemon IN (max)": costs.get("hegemon_tokens_in", 0),
                 "📦 Hegemon OUT": costs.get("hegemon_tokens_out", 0),
                 "📉 Koszt MAP ($)": costs.get("map_total_usd", 0.0),
                 "📈 Koszt Hegemona ($)": costs.get("reduce_usd", 0.0),
